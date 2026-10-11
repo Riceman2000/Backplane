@@ -45,24 +45,6 @@
   mentions = system: needle:
     lib.any (a: lib.hasInfix needle a.message) (failed system);
 in {
-  redact = pkgs.runCommand "backplane-redact" {} ''
-    awk -f ${./redact.awk} > "$out" <<'EOF'
-    Backplane listening on http://127.0.0.1:3787
-    Backplane on your tailnet: http://100.1.2.3:3787/ (pairing token abcdef0123456789abcdef0123456789)
-    Backplane on your tailnet: http://100.1.2.3:3787/ (alice's devices, or pairing token abcdef0123456789abcdef0123456789)
-    Backplane over HTTPS on your tailnet: https://box.example/#token=abcdef0123456789abcdef0123456789
-    EOF
-    grep -q 'Backplane listening on http://127.0.0.1:3787' "$out"
-    grep -q 'http://100.1.2.3:3787/' "$out"
-    grep -q 'https://box.example/' "$out"
-    grep -q 'pairing token (see the token file)' "$out"
-    grep -q '#token=(see the token file)' "$out"
-    if grep -q 'abcdef0123456789abcdef0123456789' "$out"; then
-      echo "redaction left the token in place" >&2
-      exit 1
-    fi
-  '';
-
   # Evaluating the module must accept a normal config, reject store paths,
   # and order the tailnet listener with Wants= rather than Requires=.
   eval =
@@ -236,6 +218,8 @@ in {
       machine.succeed("test \"$(stat -c %U /var/cache/backplane)\" = backplane")
       machine.succeed("test -f /var/lib/systemd/linger/backplane")
 
+      # --no-tailscale: upstream does not print the token. With the tailnet
+      # listener on, the same line is left in the journal as printed.
       machine.succeed("journalctl -u backplane -o cat --no-pager > /tmp/journal.txt")
       machine.succeed("! grep -F \"$(cat /var/lib/backplane/token)\" /tmp/journal.txt")
 

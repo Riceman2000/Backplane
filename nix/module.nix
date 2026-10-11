@@ -11,6 +11,7 @@
 # - The pairing token is 128 hex chars in <home>/token (mode 0600). It is
 #   printed in full on stdout only when the tailnet listener binds:
 #   "pairing token <hex>" and, for --tailscale-https, "<url>/#token=<hex>".
+#   The unit does not filter that line; the journal gets what the binary prints.
 # - KiStack is hardcoded to $HOME/.cache/backplane/kistack, not XDG_CACHE_HOME.
 #   Startup writes .claude-plugin/plugin.json into the revision directory and
 #   then refreshes GitHub HEAD into a `current` file. The next start prefers
@@ -88,20 +89,7 @@
         export "$name=$val"
       done
     fi
-    ${lib.escapeShellArgs serveArgs} > >(${pkgs.gawk}/bin/awk -f ${./redact.awk}) 2>&1 &
-    pid=$!
-    stop() {
-      if [ -n "$pid" ]; then
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-      fi
-      exit 0
-    }
-    trap stop TERM INT
-    set +e
-    wait "$pid"
-    status=$?
-    exit "$status"
+    exec ${lib.escapeShellArgs serveArgs}
   '';
   seedScript = pkgs.writeShellScript "backplane-kistack-seed" ''
     set -eu
@@ -343,8 +331,8 @@ in {
         default = false;
         description = ''
           Pass `--tailscale-https` (`tailscale serve` on 443). Implies the
-          tailnet listener. The pairing URL this prints contains the token;
-          the service redacts that before the journal.
+          tailnet listener. The pairing URL this prints contains the token,
+          and that line is written to the journal as the binary prints it.
         '';
       };
 
@@ -516,13 +504,7 @@ in {
         TimeoutStopSec = 30;
         KillMode = "control-group";
         # The hub prints the pairing token when the tailnet listener binds.
-        # The start script redacts that line. These patterns drop it if a
-        # future start path writes the raw line anyway. A redacted line
-        # does not match, so the tailnet URL still reaches the journal.
-        LogFilterPatterns = [
-          "~pairing token [0-9A-Fa-f]+"
-          "~#token=[0-9A-Fa-f]+"
-        ];
+        # Leave that line in the journal; do not filter it.
         StandardOutput = "journal";
         StandardError = "journal";
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
