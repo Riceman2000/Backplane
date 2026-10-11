@@ -9,7 +9,10 @@
   stdenv,
   fetchurl,
   autoPatchelfHook,
-  xorg,
+  libx11,
+  libxcb,
+  libxau,
+  libxdmcp,
   freetype,
   fontconfig,
   sources ? import ./sources.nix,
@@ -22,23 +25,23 @@
   runtimeLibs = [
     freetype
     fontconfig
-    xorg.libX11
-    xorg.libxcb
-    xorg.libXau
-    xorg.libXdmcp
+    libx11
+    libxcb
+    libxau
+    libxdmcp
   ];
   libPath = lib.makeLibraryPath runtimeLibs;
-  # @out@ is filled in during install. ${LD_LIBRARY_PATH:-} must survive
-  # `set -u` when the variable is unset (a bare $LD_LIBRARY_PATH does not).
+  # @out@ and @libPath@ are filled in during install. A toFile result must
+  # not mention a derivation, and ${LD_LIBRARY_PATH:-} must survive `set -u`.
   wrapperFor = name:
     builtins.toFile "backplane-${name}-wrapper" ''
       #!/bin/sh
       set -eu
       export BACKPLANE_NO_UPDATE=1
       if [ -n "''${LD_LIBRARY_PATH:-}" ]; then
-        export LD_LIBRARY_PATH=${libPath}:$LD_LIBRARY_PATH
+        export LD_LIBRARY_PATH=@libPath@:$LD_LIBRARY_PATH
       else
-        export LD_LIBRARY_PATH=${libPath}
+        export LD_LIBRARY_PATH=@libPath@
       fi
       exec @out@/libexec/backplane/${name} "$@"
     '';
@@ -63,6 +66,8 @@ in
       "ld-linux-x86-64.so.2"
       "ld-linux-aarch64.so.1"
     ];
+
+    inherit libPath;
 
     dontStrip = true;
     dontConfigure = true;
@@ -102,8 +107,8 @@ in
 
       test -x "$libexec/backplane"
       test -x "$libexec/backplane-serve"
-      substitute ${wrapperFor "backplane"} "$out/bin/backplane" --subst-var out
-      substitute ${wrapperFor "backplane-serve"} "$out/bin/backplane-serve" --subst-var out
+      substitute ${wrapperFor "backplane"} "$out/bin/backplane" --subst-var out --subst-var libPath
+      substitute ${wrapperFor "backplane-serve"} "$out/bin/backplane-serve" --subst-var out --subst-var libPath
       chmod 755 "$out/bin/backplane" "$out/bin/backplane-serve"
       runHook postInstall
     '';
