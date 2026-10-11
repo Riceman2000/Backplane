@@ -15,7 +15,9 @@
     printf '%s\n' '# pcb' > "$out/skills/pcb/SKILL.md"
     printf '%s\n' '{"name":"kistack","description":"fixture"}' > "$out/.claude-plugin/plugin.json"
   '';
+  # recursiveUpdate: a plain // replaces services.backplane and drops enable.
   minimal = extra:
+    lib.recursiveUpdate
     {
       system.stateVersion = "26.05";
       boot.loader.grub.enable = false;
@@ -26,7 +28,7 @@
       services.backplane.enable = true;
       services.backplane.package = package;
     }
-    // extra;
+    extra;
   eval = extra:
     nixpkgs.lib.nixosSystem {
       system = pkgs.stdenv.hostPlatform.system;

@@ -401,11 +401,11 @@ in {
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = storeSecrets == [];
+        assertion = builtins.length storeSecrets == 0;
         message = "services.backplane refuses secret paths in /nix/store: ${lib.concatStringsSep ", " storeSecrets}";
       }
       {
-        assertion = relativeSecrets == [];
+        assertion = builtins.length relativeSecrets == 0;
         message = "services.backplane secret paths must be absolute: ${lib.concatStringsSep ", " relativeSecrets}";
       }
     ];
