@@ -171,6 +171,9 @@ in {
 
   nixos = pkgs.testers.nixosTest {
     name = "backplane";
+    # Do not require the kvm system feature. QEMU is still invoked with
+    # accel=kvm:tcg, so a builder without KVM emulates.
+    requiredFeatures.kvm = false;
     nodes.machine = {
       imports = [module];
       system.stateVersion = "26.05";
