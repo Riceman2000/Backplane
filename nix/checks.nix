@@ -169,7 +169,9 @@ in {
       printf '%s\n' "backplane ${version}" > "$out"
     '';
 
-  nixos = pkgs.testers.nixosTest {
+  # runNixOSTest is the module interface, so requiredFeatures.kvm can be
+  # turned off. testers.nixosTest's legacy makeTest does not accept it.
+  nixos = pkgs.testers.runNixOSTest {
     name = "backplane";
     # Do not require the kvm system feature. QEMU is still invoked with
     # accel=kvm:tcg, so a builder without KVM emulates.
