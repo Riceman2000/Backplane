@@ -219,7 +219,9 @@ in {
 
     testScript = ''
       start_all()
-      machine.wait_for_unit("linger-users.service")
+      # linger-users is a oneshot without RemainAfterExit, so it is inactive
+      # after it succeeds. The linger file is the thing that matters.
+      machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("backplane.service")
       machine.wait_for_open_port(3787)
       machine.succeed("curl -sf http://127.0.0.1:3787/hello -o /tmp/hello")
