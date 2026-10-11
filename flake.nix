@@ -32,6 +32,7 @@
       default = {
         type = "app";
         program = "${pkgs.backplane}/bin/backplane";
+        meta.description = "Run the Backplane window and hub";
       };
     });
 

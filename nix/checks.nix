@@ -167,7 +167,7 @@ in {
       printf '%s\n' "backplane ${version}" > "$out"
     '';
 
-  nixos = pkgs.nixosTest {
+  nixos = pkgs.testers.nixosTest {
     name = "backplane";
     nodes.machine = {
       imports = [module];
