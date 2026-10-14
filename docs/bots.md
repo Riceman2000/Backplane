@@ -50,6 +50,25 @@ that project. Declining makes nothing.
 setting `bot.parent.<id>`. Sub-bots go at most two levels below a bot a
 person made (law `bot_spawn_bounded`), and a bot keeps at most eight.
 
+## Launched threads report back
+
+A bot (or any thread) that starts work with `thread_launch` hears back by
+itself, the way `delegate_task` results arrive: each time the launched
+thread's turn ends it gets one message with the thread's title and id, its
+state (completed, waits for an answer, failed, interrupted) and its last
+reply cut to about 1.5 KB (`thread_read` for the rest), and an ask the thread
+opens for the person is passed on at once. The message wakes the launcher,
+or waits in its queue behind a running turn (the queue is in the log, so
+order survives a restart). `thread_launch {report: false}` launches quietly,
+and `thread_update {threadId, report: false|true}` changes it later. A
+thread that already wrote to its launcher in the turn, or one its launcher
+stopped itself, is not echoed back; twenty turns in a row started by the
+launcher with no word from the person end the reports with a note saying
+so. The uberbot hears on the machine that holds its conversation; a
+launcher on another machine is sent its reports in order, again each
+minute until that machine takes them. A bot turn woken only by a report
+sends the person no push: the launched thread alerted for itself.
+
 ## Conversation depth
 
 A message a bot sends carries a hop count: a human, a routine, a webhook or
@@ -163,38 +182,177 @@ phone with several hubs each row also carries its machine.
 
 ## Notifications
 
-One item, one alert (`src/core/notice.bend`, laws `notice_*`). A turn's end
-alerts the person unless it is part of a room exchange they read in the
-room:
+Settings’ **Notify me for** section controls Needs me, Settled, Reminders
+and Everything on the window, web, iOS and Android.
 
-- A failed turn always alerts.
-- A thread that is not a bot's alerts when it finishes.
-- A bot with an open ask (waiting on the person) alerts.
-- A bot turn that posted in a room, or sent to a bot, alerts only if its
-  post opened the room's exchange: no other bot posted in the room since the
-  person's last post there, or in the last 5 minutes. Its key is
-  `room-<room id>`, the same on every linked machine, so apps and APNs
-  replace one alert with the next instead of stacking them.
-- A bot turn woken by a room or bot message that posted nothing is quiet.
-- A bot turn the person started in the bot's own thread, or a routine's,
-  alerts as before (`turn-<thread>`).
+The person is alerted (the phones' APNs push, the phones' own alerts,
+desktop notifications, and the same relayed to the owner's other machines)
+in three cases only (`src/core/notice.bend`, `Policy.*`, laws `policy_*`,
+`notify_*`):
 
-A hub counts only its own bots' posts (it pushes only for its own threads). A
-phone paired with several hubs counts every bot, so only the hub whose bot
-answered first raises the alert. A held push is logged as
-`backplane: push alert held for <thread>`.
+1. **Needs you.** An ask opens for the person (any kind: a tool approval,
+   a plan, a question, an input, a Google approval, a browser task that
+   is stuck), or a bot calls `notify_person` with reason `needs_you`. It
+   alerts when the ask opens, under the key `ask-<thread>`.
+2. **Settled.** Work the person gave a thread is finished: its turn
+   completed with everything it waits on done, or its branch merged. One
+   alert per settle, key `turn-<thread>`. A failure counts when the person
+   must act: the turn they started failed.
+3. **Scheduled.** A bot's `notify_person` with reason `reminder` or
+   `digest` in a turn a routine started, or a reminder that came due
+   (`Policy.reminder`: kind `reminder`, key `remind-<id>`, never held by a
+   desk).
+
+Everything else alerts no one and stays visible in the app (unread,
+badges, the Status plane): intermediate turn ends, progress, turns woken by
+rooms or bots, posts between bots, reports to launcher threads,
+routines that do not call `notify_person`, delegated-task notes, stops,
+and failures of turns the person did not start.
+
+**Settle once.** The person's message in a thread is the newest user
+message typed by them (`Policy.person`: not a link `t:<from>:<n>`, not a
+`[message from …]`, `[routine: …]` or `[Backplane] …` note, except
+`[message from person@…]`, the person typing from another machine). A turn
+end settles it when the thread is ready (`Policy.ready`: not running,
+nothing queued, no child tasks, background or watched work, no open ask,
+no reporting launched thread still working) and the message is not the
+one already settled (the settle memory). So a thread that launched helpers
+and ended its turn early alerts once, at the end of the turn the last
+report wakes; a bot's routine or room turn after the person's message
+settled alerts nothing. Stopping a thread ends its episode quietly.
+
+**The record.** The hub writes each alert as the setting `alert.<thread>`
+in the step that causes it (`Alert.*`): `kind\tkey\tsettled\tstamp\ttext`,
+kind `ask`, `done`, `fail`, `merged`, `note` (`notify_person`) or empty (a
+settle whose setting is off, which still counts as settled). Every step
+passes through `Alerts.changes` (an `AskOpened` gets its record) and
+`Alerts.outs` (a record with a kind raises the `Alerted` out) before it is
+stored, so alerts come from one place. The server's `Alerted` pushes to the
+phones (`Push.note.*`, collapse id the record's key), shows the desktop
+notification on the desk used last and tells the owner's other machines;
+`TurnEnded` only updates the island. A phone alerts for a thread when its
+record changed in the frame it folded and the new kind is not empty
+(`Note.ralerts`; never at a cold join or a saved state). The apps show the
+record's text (a note, an ask's tool and detail, a merge's url) or the
+thread's last reply.
+
+**Settings** (hub settings, `on`/`off`): `notify.needs` (on), `notify.settled`
+(on), `notify.reminders` (on), `notify.all` (off: also alert whatever the
+older rule `Notice.of` alerted, room exchanges and every turn of a plain
+thread, as before this policy).
+
+**Bots.** `notify_person {text, reason}`: `needs_you` (once per turn),
+`done` (work the person gave the bot in its own thread, once per message;
+the turn's end then alerts nothing more), `reminder` or `digest` (only in a
+turn a routine started, once per turn). Anything else is refused with the
+reason (`Bots.notify`); with the matching setting off the call succeeds and
+records no kind.
+
+A held alert is logged as `backplane: push alert held for <thread> (a desk
+in use is showing it)`.
 
 ### Desks
 
 The window and the web page are desks (`src/core/desk.bend`). Each tells
 the hub which thread it shows and whether it has the focus, when either
-changes and at most once a minute while in use. A thread a focused desk
-shows, used in the last 3 minutes, is being watched: its turn's end raises
-no phone alert (neither the APNs push nor the phone's own), and no desktop
-notification. Any other alert also shows as a desktop notification on the
-desk used last: the browser's notifications (the page asks for permission
-on the first click or key; macOS, Windows, Linux) or `notify-send` from the
-Linux window. Clicking it opens the thread.
+changes and at most once a minute while in use. A desk is in use only after
+the person's input: keys, the pointer, the wheel, focus changes. A redraw,
+a resize, an expose, a drag passing over, a timer or the window closing is
+not (`Nui.input`, laws `desk_redraw_not_input`, `desk_key_input`). A thread
+a focused desk shows, used in the last 3 minutes, is being watched: an ask,
+a settle, a failure or a merge for it raises no phone alert (neither the
+APNs push nor the phone's own), no desktop notification and no note to the
+owner's other machines. A `notify_person` note is never held. Any other
+alert also shows as a desktop notification on the desk used last: the
+browser's notifications (the page asks for permission on the first click or
+key; macOS, Windows, Linux) or `notify-send` from the Linux window.
+Clicking it opens the thread.
+
+## Already told
+
+A record of what the person has actually been told, so a bot's digest, a
+reminder or a second bot does not say it again (`src/core/told.bend`).
+Each record is the setting `told.<id>` holding `{key, text, channel, bot,
+at}`: the topic key (lower case, runs of characters outside
+`[a-z0-9._:-]` become `-`, 120 at most), what was said (280 characters at
+most), the channel (`alert`, `digest`, `room`, `chat`, `email` or `other`),
+the bot that said it (`""` for a thread that is no bot's) and when.
+
+Every alert is marked by itself. Since the notification policy, each one
+comes from a record `alert.<thread>` that some step writes with a kind
+(see Notifications): a settled turn, an ask, a failure, a merge, a
+`notify_person` note. `Told.after` (called from hub.bend's
+`Alerts.changes`, which every step passes through) marks each record that
+has a kind, under the record's key (`turn-<thread>`, `room-<room>`,
+`note-...`) with channel `alert`, the thread's bot, and the record's text
+or else the thread's title and the first line of its last reply. A quiet
+record marks nothing: a bot's chatter, a report from a launched thread
+(bot-to-bot), a stopped turn. Whether to alert stays `notify_person`'s
+policy; `told_*` only says what was already said. Agents use two tools, in every thread:
+
+- `told_check {key?, text?, days?}`: whether the key matches, or the words
+  of the text overlap a record's (at least 60% of the smaller set and 2
+  words) within `days` (default 7, at most 30). Answers `{told, matches:
+  [{key, text, channel, bot, at, ago}]}`.
+- `told_mark {key?, text, channel?}`: records it. Without a key one is made
+  from the text's first eight words. Answers `{key}`.
+
+Records live in the settings, on this machine only (they are not synced to
+the owner's other machines). The minute tick removes records older than 30
+days and all but the newest 2000 (`Told.prune`, reading only the keys: a
+record's time is in its id). An empty value removes a `told.*`, `rule.*`
+or `board.*` setting (`State.setting`), so none are left behind.
+
+## Standing rules
+
+What the person wants always done, or never done (`src/core/rules.bend`).
+A rule is the setting `rule.<id>` holding `{id, text, bot, project, tool,
+enforce, word, on, at, by}`: its words; the bot it is for (`""` all), the
+project (`""` all), tool patterns (names, or a prefix ending in `*`,
+separated by commas or spaces), whether it is enforced, the word that
+unlocks it, and whether it is on. The person edits them with `rules.set
+{rule}` (with an `id` it changes that rule) and `rules.drop {id}`; the
+reply carries a validation error (`bot` and `project` may be names).
+
+Every turn of every thread starts with the `<rules>` block of the rules
+that apply to it (`Rules.agent`, outermost in `Bots.turn`, before the
+memory block and the references). An enforced rule with a tool is also
+checked: the server's MCP gate (`Hub.mcp.gate`, `Rules.gate`) answers a
+call of a matching tool with an error saying which rule refuses it, and
+the permission prompt gets a deny, unless the person's latest message
+says the rule's word as a whole word (a message delivered from a room,
+bot, routine, webhook or space starts with `[` and never unlocks). A tool
+name matches as given or without its `mcp__<server>__` prefix. The reach
+is Backplane's own MCP tools and anything that asks permission; a
+provider's built-in tools in a bypass mode never reach the hub, so a rule
+on them can only be injected as words. Rules are settings, local to this
+machine (not synced to others).
+
+## Task board
+
+One shared list of what is to be done (`src/core/tboard.bend`). An item is
+the setting `board.<id>` holding `{id, title, status, owner, project, due,
+group, links, notes, at, updated, by}`: status `todo`, `doing`, `blocked`,
+`done` or `dropped`; the owner a bot's id (`""` is the person); the due
+date `YYYY-MM-DD`; at most 20 links and 4000 characters of notes. Agents
+in every thread have:
+
+- `task_board_list {status?, owner?, project?, group?, all?}`: open items
+  by default, in board order (open before closed, due first). `owner` may
+  be `me` or `person`. Answers `{text, items}`.
+- `task_board_add`, `task_board_update` (only the fields given change;
+  `notes_append` adds a line) and `task_board_remove` (prefer status
+  `dropped`, which keeps a record). Names or ids for owner and project.
+- `task_board_import {markdown, project?, owner?}`: checkbox items
+  (`- [ ]`, `- [x]`, `- [~]`, `- [!]`, `- [-]`; `*`, `+` and `1.` too)
+  become items, headings become groups (a heading naming a project also
+  sets the project), a due date at the end of a title is taken out of it,
+  indented lines under an item are its notes. Other lines are returned as
+  `skipped`; importing the same list again adds nothing.
+
+The person edits the board with `board.set {item}` (with an `id` it
+updates) and `board.drop {id}`. The items are settings, local to this
+machine (not synced to others).
 ## Mentions in threads
 
 In any thread's composer (web, window, phones) a word that starts with a
@@ -359,10 +517,48 @@ URL, so Hold & talk and Double click & hold can go to different bots.
 
 ## Routines
 
-A routine is a cron line (5 fields, the hub's time zone, `*`, lists,
-ranges, steps, and `@hourly`/`@daily`/`@weekly`) and a prompt. The hub's
-minute tick fires a due routine once (`RoutineFired` records it), even
-after being off for a while (one catch-up run, never a burst).
+A routine is a cron line (5 fields, `*`, lists, ranges, steps, and
+`@hourly`/`@daily`/`@weekly`) and a prompt. The hub's minute tick fires a
+due routine once (`RoutineFired` records it), even after being off for a
+while (one catch-up run, never a burst).
+
+**Time.** A routine made through `routine_set` or the forms follows the
+person's time zone (`tz: "person"`): its cron line is the wall clock there,
+daylight saving included, so `30 9 * * *` is 09:30 wherever they are. `tz`
+may name an IANA zone instead; `machine` (stored as `""`) is the old
+behaviour, the hub machine's offset from `date +%z`, and is what a routine
+with no plan event has (nothing is migrated). A zoned routine remembers the
+zone's wall clock at its last fire (`RoutineSlot`) and fires once per
+wall-clock slot: a zone that moves west never repeats a slot, one that moves
+east fires one catch-up, DST fall-back fires 03:30 once, spring-forward fires
+it once at 04:00 (`Sched.due`, laws `sched_*`).
+
+**Once and reminders.** `routine_set` with `at` (`2026-10-14T09:00`,
+`in 20m`, `tomorrow 9am`, `monday 09:30`, `17:30`; `When.parse`) fires once at
+that instant and is then done (`RoutineDone`): it stays in the list, greyed,
+and never fires again; setting it again with a new time makes it pending.
+`remind_person {at, text}` makes a routine of kind `remind`: no agent turn;
+the hub logs `Reminded` (an entry in the bot's thread: a bell, the text, the
+time) then `RoutineFired` and `RoutineDone`, and alerts the person once
+(APNs under the key `remind-<id>`, the desk used last, the phones' own alerts
+on a live frame), whatever a desk is watching.
+
+**Events** (appended to the log, codec tags 59..62): `RoutinePlan{id, once,
+tz, kind}` after a `RoutineSet` (a `RoutineSet` alone keeps the plan),
+`RoutineSlot{id, slot}`, `RoutineDone{id}`, `Reminded{id, bot, thread, text}`.
+
+**The person's zone.** `person.tz` (set by hand, `person_timezone`, or
+`zone.set`) beats `person.tz.device` (a phone's report, `zone.report`, sent
+to every paired hub at connect and when the zone changes), which beats
+`tz.machine` (the hub machine's own), then UTC (`Zone.person`, `Zone.source`).
+Settings shows "Time zone" on every client with a field, Set and Automatic.
+
+**Showing.** `Sched.row` gives every client the same row: a kind chip
+(Repeats, Once, Reminder with a bell), when, `Next ... · in 3h` in the
+person's zone, the zone when it is not theirs, and `Done · ...`; a bot's list
+is pending by next fire, then off, then done (`Sched.order`). The forms'
+live hint is `Sched.hint`. `test/sched_test.bend`, `test/tz_test.bend`,
+`test/when_test.bend`.
 
 ## Memory
 
@@ -431,8 +627,68 @@ Gmail and Calendar through Google's APIs, not the browser: OAuth 2.0 for
 installed apps with PKCE and a loopback redirect to the hub
 (`/oauth/google`), or paste the redirected URL when the browser is on
 another device. Tools: `gmail_search`, `gmail_read`, `gmail_send`
-(asks you first), `calendar_events`, `calendar_create` (asks you first),
-`google_accounts`.
+(asks you first), `gmail_draft` (asks nobody: it sends nothing),
+`calendar_events` (each event shows its id), `calendar_create` (asks you
+first), `calendar_update` (asks you first), `calendar_delete` (asks you
+first), `google_accounts`.
+
+`calendar_create` and `calendar_update` take `reminders`: up to five
+`{method: "popup"|"email", minutes: 0..40320}` (a bare number is a popup that
+many minutes ahead). Given, they replace the calendar's default alerts; `[]`
+means no alerts; omitted leaves the defaults. `calendar_update` also takes
+`default_reminders: true` to give the defaults back, and changes only the
+fields it is given (`attendees` replaces the list; `start` without `end`
+keeps the event's length). Guests are told (`sendUpdates=all`) when the event
+or the change has attendees. A missing event answers `error: no event with id
+<id>`.
+
+For update and delete the hub fetches the event off its loop first
+(`Gt.prep`, `Google.prepare`), settles the arguments (`Cal.resolve`) and
+posts `CalAsk`, which opens the approval with the change in words
+(`Cal.change.detail`: old `=>` new for time, title, place, alerts,
+attendees; `Cal.delete.detail`). After you accept (or a session approval),
+exactly those arguments run. A failed fetch answers the agent and opens no
+ask.
+
+Mail. `gmail_send` and `gmail_draft` take `to`, `cc`, `bcc`, `subject`,
+`body`, `html` (the body is HTML; sent as `multipart/alternative` with its
+text), `reply_to` (a message id) or `thread` (a conversation id; its last
+message), `attachments` (absolute paths, a JSON array or one
+comma-separated string), `draft` and `account`. A reply carries
+`In-Reply-To` and `References` and joins the original's conversation
+(`threadId`); `subject` defaults to `Re: <original>` (not twice) and `to` to
+the original's `Reply-To`, else its sender. Attachments: at most 20, each
+and all together at most 18 MB (`Gmail.att_max`); the hub never reads their
+bytes into Bend: a shell step probes them (`Gm.probe.sh`) and assembles the
+message on disk (`base64 | tr | fold | awk`, `Gm.assemble.sh`) in a folder
+`<home>/secrets/gm-<nonce>` (0700, removed after the send or the refusal),
+and every message goes up by Gmail's media upload
+(`/upload/gmail/v1/users/me/messages/send?uploadType=multipart`, drafts:
+`.../drafts` to create, `PUT .../drafts/<id>` to replace). `gmail_draft`
+answers `Draft saved (draft id X, ...)`; `gmail_send {draft: X}` sends it as
+it is (any other content argument is an error) after the same approval.
+
+The approval shows the whole email, prepared off the hub's loop
+(`Gm.run`, which posts `GmailAsk` back to the hub): Account, From, To, Cc,
+Bcc, Subject, In reply to, Attachments (names and sizes), Format, then the
+body in full (up to 20000 characters; an HTML body as its text, then
+"(sent as HTML)"), the signature included (`Gmail.review`, `Gmail.draft_review`).
+What is shown is the file that is sent: nothing is composed again after
+the answer. Errors (an unreadable reply original, a bad attachment) go to
+the agent before anything is asked. The head is one text for every client
+(`Ask.head`: "Send this email?", "Send this draft?", "Create this event?",
+else "Allow <tool>?"); the window wraps the detail (at most 14 lines, the
+rest scroll with the wheel, pane `ask:<id>`), the web scrolls it (50vh),
+the phones scroll it in a 300-point box.
+
+Signature: the hub setting `gmail.sig.<address>` (not a secret), appended to
+a message composed by `gmail_send` or `gmail_draft` (`Gmail.signed`: plain
+text after a blank line, HTML escaped after two `<br>`); never to a draft
+being sent. Settings: each Google account has a Signature button
+(`google` action `sig-edit:<address>`, then `sig-save`, which writes the
+setting; an empty text removes it, `sig-cancel`).
+Laws `gmail_*`, `ask_head_*`; tests `test/google_test.bend`,
+`bun test/tools/google_e2e.ts`.
 
 Google always sends the browser back to `127.0.0.1:<port>`, so a sign-in
 started on another machine's hub (a phone, or a window linked to that
@@ -518,8 +774,15 @@ the signed headers on stdin and the body in a 0600 file under
 others is `BACKPLANE_NAME`, else its host name; its address is its
 MagicDNS name on the tailnet (same port), else its listen address.
 
-Every minute the hub runs due routines (`date +%z` for the time zone)
-and asks each linked machine for its bots; the merged list is the info
+Every minute the hub runs due routines (legacy ones by `date +%z`, the rest
+by their zone's rule) and resolves time zones: a zone's POSIX rule is the
+footer line of `/usr/share/zoneinfo/<name>` (`tail -n 1`), kept as the setting
+`tz.rule.<name>`; one the system knows only by offset is taken as the offset
+it has (`TZ=<name> date +%z`). It resolves the person's, the phone's and the
+machine's zones (`tz.machine`) and the ones live routines name, those with no
+rule at once and all of them once a day (`tz.checked`); a name is checked
+first (letters, digits, `_+-` between slashes, at most 64 characters). It also
+asks each linked machine for its bots; the merged list is the info
 key `bots.remote` (a machine that does not answer keeps its bots, away).
 `test/tools/bots_e2e.ts` runs two hubs against each other; `test/tools/newproj_e2e.ts` runs project_create on one.
 
@@ -790,7 +1053,7 @@ it stops, from disk after a restart).
 
 ### Agents across machines
 
-An agent (Claude, Codex or Grok, through the hub's MCP tools) works with the owner's other machines
+An agent (Claude, Codex, Grok or Muse, through the hub's MCP tools) works with the owner's other machines
 the way it works with its own project. `src/core/fmcp.bend` is the whole of it.
 
 - `machine_list` (every agent): this machine first, then each linked machine (`here` or `away`) with its

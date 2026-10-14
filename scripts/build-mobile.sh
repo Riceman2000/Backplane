@@ -5,14 +5,16 @@
 # The iOS app is built on a Mac: mobile/ios/build.sh (see mobile/README.md).
 set -eu
 cd "$(dirname "$0")/.."
-out=$(bend src/mobile/app.bend --check-only 2>&1) || { echo "$out"; exit 1; }
-case $out in *"All terms check"*) ;; *) echo "$out"; exit 1 ;; esac
+. scripts/bendok.sh
+bend_check src/mobile/app.bend || exit 1
 rm -rf build/mobile-web
 bend src/mobile/index.html -o build/mobile-web >/dev/null
 mkdir -p mobile/build/assets
 cat build/mobile-web/chunk-*.js > mobile/build/assets/bridge.js
 # native string comparisons (Bend's walk a char at a time: half a screen's cost)
 python3 scripts/bridge-native.py mobile/build/assets/bridge.js
+# the client state crosses into Bend as it is, not rebuilt at every call
+python3 scripts/js-unmarshal.py hubs.Hubs mobile/build/assets/bridge.js
 # the kept state's name: the apps keep it across builds with the same types
 printf '\nglobalThis.BackplaneStateKey = "%s";\n' "$(python3 scripts/state-key.py)" >> mobile/build/assets/bridge.js
 echo "mobile/build/assets/bridge.js ($(wc -c < mobile/build/assets/bridge.js) bytes)"

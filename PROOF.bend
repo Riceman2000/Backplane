@@ -1,4 +1,8 @@
 import Base
+import ./src/core/tz.bend as TZ
+import ./src/core/when.bend as WH
+import ./src/core/sched.bend as SCH
+import ./src/core/locks.bend as LCK
 import ./src/gfx/text.bend as X
 import ./src/core/bothub.bend as BHS
 import ./src/core/bot.bend as BOT
@@ -45,6 +49,7 @@ import ./src/gfx/face.bend as FA
 import ./src/core/glb.bend as G
 import ./src/mobile/picker.bend as MP
 import ./src/mobile/hubs.bend as Hb
+import ./src/mobile/bots.bend as MBN
 import ./src/core/space.bend as SPC
 import ./src/core/client.bend as U
 import ./src/core/menu.bend as MN
@@ -58,6 +63,14 @@ import ./src/core/google.bend as GO
 import ./src/core/cat.bend as CAT
 import ./src/core/voice.bend as VO
 import ./src/core/once.bend as ON
+import ./src/core/bom.bend as BOM
+import ./src/core/cad.bend as CAD
+import ./src/core/checks.bend as CHK
+import ./src/core/release.bend as REL
+import ./src/core/plane.bend as PLN
+import ./src/core/uber.bend as UBR
+import ./src/core/ubersync.bend as UBS
+import ./src/core/ubop.bend as UBO
 
 # Lemmas
 # ------
@@ -97,17 +110,20 @@ def u32_cmp_refl(x):
     case U32{+w}:
       word_cmp_refl(32n, w)
 
-law eq_fin_rec:
-  for -h1: Char
-  for -h2: Char
-  for r: (String & String) & Cmp
-  {String.eq.fin(String.cmp.rec(h1, h2, r)) == String.eq.fin(r) : Bool}
+# a string compares equal to itself, handing both copies back
+law string_cmp_refl:
+  for +s: String
+  {String.cmp(s, s) == ((s, s), EQ{}) : (String & String) & Cmp}
 
-def eq_fin_rec(h1, h2, r):
-  match r:
-    case (ab, c):
-      match ab:
-        case (a, b):
+def string_cmp_refl(s):
+  match s:
+    case SNil{}:
+      {==}
+    case SCon{+h, +t}:
+      match h:
+        case Chr{+x}:
+          %Equal.sym(Cmp, U32.cmp(x, x), EQ{}, u32_cmp_refl(x)) : {String.cmp.fin(t, t, ((Chr{x}, Chr{x}), _)) == ((SCon{Chr{x}, t}, SCon{Chr{x}, t}), EQ{}) : (String & String) & Cmp}
+          %Equal.sym((String & String) & Cmp, String.cmp(t, t), ((t, t), EQ{}), string_cmp_refl(t)) : {String.cmp.rec(Chr{x}, Chr{x}, _) == ((SCon{Chr{x}, t}, SCon{Chr{x}, t}), EQ{}) : (String & String) & Cmp}
           {==}
 
 # False is not True
@@ -219,16 +235,8 @@ def put_count(sh, t, s):
 # ----
 
 def Laws.string_eq_refl(s):
-  match s:
-    case SNil{}:
-      {==}
-    case SCon{+h, +t}:
-      match h:
-        case Chr{+x}:
-          %Equal.sym(Cmp, U32.cmp(x, x), EQ{}, u32_cmp_refl(x)) : {String.eq.fin(String.cmp.fin(t, t, ((Chr{x}, Chr{x}), _))) == True{} : Bool}
-          Equal.trans(Bool, String.eq.fin(String.cmp.rec(Chr{x}, Chr{x}, String.cmp(t, t))),
-            String.eq.fin(String.cmp(t, t)), True{},
-            eq_fin_rec(Chr{x}, Chr{x}, String.cmp(t, t)), Laws.string_eq_refl(t))
+  %Equal.sym((String & String) & Cmp, String.cmp(s, s), ((s, s), EQ{}), string_cmp_refl(s)) : {Cmp.is_eq(Pair.snd(String & String, Cmp, _)) == True{} : Bool}
+  {==}
 
 def Laws.settle_at_window(last, w):
   Nat.ge_refl(Nat.add(last, w))
@@ -902,22 +910,6 @@ def Laws.island_idle_empty(ts, es, h):
       Laws.island_idle_empty(t, es, h)
     case M.Thread{id, p, ti, c, a, M.Failed{}, pe, ar, o, sa, ua, pi, en, br, wt, pr, mo, rm, im, se, de} <> t:
       Laws.island_idle_empty(t, es, h)
-
-# a string compares equal to itself, handing both copies back
-law string_cmp_refl:
-  for +s: String
-  {String.cmp(s, s) == ((s, s), EQ{}) : (String & String) & Cmp}
-
-def string_cmp_refl(s):
-  match s:
-    case SNil{}:
-      {==}
-    case SCon{+h, +t}:
-      match h:
-        case Chr{+x}:
-          %Equal.sym(Cmp, U32.cmp(x, x), EQ{}, u32_cmp_refl(x)) : {String.cmp.fin(t, t, ((Chr{x}, Chr{x}), _)) == ((SCon{Chr{x}, t}, SCon{Chr{x}, t}), EQ{}) : (String & String) & Cmp}
-          %Equal.sym((String & String) & Cmp, String.cmp(t, t), ((t, t), EQ{}), string_cmp_refl(t)) : {String.cmp.rec(Chr{x}, Chr{x}, _) == ((SCon{Chr{x}, t}, SCon{Chr{x}, t}), EQ{}) : (String & String) & Cmp}
-          {==}
 
 def Laws.device_token_never_sent(tok, p, k, th, e, b, at):
   {==}
@@ -4214,6 +4206,18 @@ def Laws.interrupt_codex_stops(th, r):
 def Laws.interrupt_grok_stops(th, r):
   {==}
 
+def Laws.interrupt_muse_stops(th, r):
+  {==}
+
+def Laws.muse_run_turn(th, cwd, m, s, r, i, t, u):
+  {==}
+
+def Laws.msp_mode_supervised_asks():
+  {==}
+
+def Laws.msp_mode_full_allows():
+  {==}
+
 def Laws.archive_running_stops():
   {==}
 
@@ -5383,7 +5387,7 @@ law cat_mod_lt:
   for +r: Nat
   for -bp: Nat
   for e: {Nat.add(r, m) == bp : Nat}
-  {Nat.is_lt(Nat.mod.fin(Nat.divmod.go(n, m, d, r)), 1n+bp) == True{} : Bool}
+  {Nat.is_lt(Pair.snd(Nat, Nat, Nat.divmod.go(n, m, d, r)), 1n+bp) == True{} : Bool}
 
 def cat_mod_lt(n, m, d, r, bp, e):
   match n m:
@@ -6006,6 +6010,10 @@ def Laws.bots_away_cat_posed_once(c):
   {==}
 
 def Laws.bots_moving_cat_follows_clock(c):
+  {==}
+
+def Laws.bots_cats_calm_on_input(ms):
+  %Equal.sym(Nat, Nat.sub(ms, ms), 0n, sub_self(ms)) : {Nat.sub(1000n, _) == 1000n : Nat}
   {==}
 
 def Laws.far_id_parts():
@@ -7265,55 +7273,23 @@ def Laws.bots_post_once(mid, m, s, now, client, id, text):
 
 def Laws.bots_tell_once(mid, remote, s, now, client, id, to, text):
   {==}
-def Laws.contain_default_half():
+def Laws.exit_why_killed():
   {==}
 
-def Laws.contain_clamp_min():
-  {==}
 
-def Laws.contain_clamp_max():
-  {==}
 
-def Laws.contain_set_gib():
-  {==}
 
-def Laws.contain_test_mib():
-  {==}
 
-def Laws.contain_unit_safe():
-  {==}
 
-def Laws.contain_oom_words():
-  {==}
 
-def Laws.contain_plain_exit():
-  {==}
 
-def Laws.contain_words_gb():
-  {==}
 
-def Laws.contain_no_expand():
-  {==}
-def Laws.contain_tag_mine():
-  {==}
 
-def Laws.contain_stop_scope():
-  {==}
 
-def Laws.contain_stale_units():
-  {==}
 
-def Laws.contain_thread_of():
-  {==}
 
-def Laws.contain_why_oom():
-  {==}
 
-def Laws.contain_why_plain():
-  {==}
 
-def Laws.contain_why_missing():
-  {==}
 
 def Laws.live_split_fence_safe():
   {==}
@@ -8006,4 +7982,1016 @@ def Laws.lyr_kind_base():
   {==}
 
 def Laws.lyr_masks_only():
+  {==}
+
+# Design review: comparing
+def Laws.rv_diff_on_all(a, b):
+  {==}
+
+def Laws.rv_mark_on_all(olds, news):
+  {==}
+
+def Laws.rv_sheet_plain():
+  {==}
+
+def Laws.rv_sheet_compared():
+  {==}
+
+def Laws.rv_bits_plain(kind):
+  {==}
+
+# Design review (bom)
+
+def Laws.bom_nat_c2_c10():
+  {==}
+
+def Laws.bom_nat_r10_r2():
+  {==}
+
+def Laws.bom_diff_self():
+  {==}
+
+def Laws.bom_group_qty():
+  {==}
+
+def Laws.bom_group_csv():
+  {==}
+
+def Laws.bom_csv_quote():
+  {==}
+
+def Laws.bom_csv_quote_inner():
+  {==}
+
+def Laws.bom_csv_plain():
+  {==}
+
+def Laws.bom_diff_line():
+  {==}
+
+def Laws.bom_diff_md_none():
+  {==}
+
+def Laws.bom_md_pipe():
+  {==}
+
+# Design review (checks, cad, release)
+
+def Laws.cad_of_kicad_board():
+  {==}
+
+def Laws.cad_of_kicad_schematic():
+  {==}
+
+def Laws.cad_of_case_ignored():
+  {==}
+
+def Laws.cad_of_altium_not_drawn():
+  {==}
+
+def Laws.cad_of_unknown():
+  {==}
+
+def Laws.cad_fill_puts_vars_in():
+  {==}
+
+def Laws.cad_fill_keeps_other_braces():
+  {==}
+
+def Laws.cad_shell_quotes_a_quote():
+  {==}
+
+def Laws.cad_shell_words():
+  {==}
+
+def Laws.checklist_toggle_twice():
+  {==}
+
+def Laws.checklist_toggle_flips_one():
+  {==}
+
+def Laws.checklist_toggle_past_end():
+  {==}
+
+def Laws.checks_gate_no_findings():
+  {==}
+
+def Laws.checks_gate_no_findings_strict():
+  {==}
+
+def Laws.checks_md_empty():
+  {==}
+
+def Laws.checks_erc_error_counted():
+  {==}
+
+def Laws.release_next_dotted():
+  {==}
+
+def Laws.release_next_letter():
+  {==}
+
+def Laws.release_next_plain():
+  {==}
+
+def Laws.release_next_first():
+  {==}
+
+def Laws.release_tag_valid():
+  {==}
+
+def Laws.release_tag_no_space():
+  {==}
+
+def Laws.release_tag_no_dotdot():
+  {==}
+
+def Laws.release_tag_no_dash_lead():
+  {==}
+
+def Laws.release_tag_no_lock_end():
+  {==}
+
+def Laws.release_tag_not_empty():
+  {==}
+
+def Laws.release_dir_in_repo():
+  {==}
+
+def Laws.release_gh_command():
+  {==}
+
+# Design review (review.bend)
+
+def Laws.review_fold_empty():
+  {==}
+
+def Laws.review_prompt_none():
+  {==}
+
+def Laws.review_unknown_ignored():
+  {==}
+
+def Laws.review_resolve():
+  {==}
+
+def Laws.review_reopen():
+  {==}
+
+def Laws.review_prompt_resolved():
+  {==}
+
+def Laws.review_drop():
+  {==}
+
+def Laws.review_reply_no_pin():
+  {==}
+
+def Laws.review_reply_counted():
+  {==}
+
+def Laws.review_orphan_ignored():
+  {==}
+
+def Laws.review_roundtrip_resolve():
+  {==}
+
+def Laws.review_roundtrip_edit():
+  {==}
+
+def Laws.review_roundtrip_drop():
+  {==}
+
+def Laws.review_other_tone():
+  {==}
+
+def Laws.review_moved():
+  {==}
+
+def Laws.review_not_moved():
+  {==}
+
+# Slash commands in the composer (slash.bend)
+def Laws.slash_typing_word():
+  {==}
+
+def Laws.slash_typing_alone():
+  {==}
+
+def Laws.slash_not_after_space():
+  {==}
+
+def Laws.slash_not_midline():
+  {==}
+
+def Laws.slash_claude_prefix():
+  {==}
+
+def Laws.slash_others_own_only():
+  {==}
+
+def Laws.slash_none_unknown():
+  {==}
+
+# --- uberbot: uber_*, plane_* (thread t1791834693) ---
+
+def Laws.uber_promote_far_refused(st):
+  {==}
+
+def Laws.uber_demote_clears():
+  {==}
+
+def Laws.uber_promote_sets():
+  {==}
+
+def Laws.uber_promote_again_nothing():
+  {==}
+
+def Laws.plane_each_once(u, ix, now):
+  Laws.once_distinct(PLN.PRow, PLN.Plane.all.src(u, ix, now))
+
+def Laws.plane_sections_once():
+  {==}
+
+def Laws.plane_need_ranked():
+  {==}
+
+def Laws.plane_hit_opens(t, at, pt, u, ix, st):
+  {==}
+
+# --- uberbot onboarding: onboard_uber_* ---
+
+def Laws.onboard_uber_none_creates():
+  {==}
+
+def Laws.onboard_uber_pick_most_used():
+  {==}
+
+def Laws.onboard_uber_have_quiet():
+  {==}
+
+def Laws.onboard_uber_existing_shows():
+  {==}
+
+def Laws.onboard_uber_existing_cached():
+  {==}
+
+def Laws.onboard_uber_answered_quiet():
+  {==}
+
+def Laws.onboard_uber_have_no_ask():
+  {==}
+
+def Laws.onboard_uber_skip_answers():
+  {==}
+
+def Laws.onboard_uber_single_no_back():
+  {==}
+
+def Laws.hubs_plane_once(rs):
+  Laws.once_distinct(J.Json, Hb.Hubs.pl.src(rs))
+def Laws.uber_merge_comm():
+  {==}
+
+def Laws.uber_merge_idem():
+  {==}
+
+def Laws.uber_forget_wins_older():
+  {==}
+
+def Laws.uber_forget_loses_newer():
+  {==}
+
+def Laws.uber_one_holder_per_term():
+  {==}
+
+def Laws.uber_higher_term_wins():
+  {==}
+
+def Laws.uber_fire_holder_only(mine, holder):
+  {==}
+
+def Laws.uber_pinned_stays(mine, holder):
+  {==}
+
+def Laws.uber_slot_once(pinned, mine, holder):
+  {==}
+
+def Laws.uber_fire_state():
+  {==}
+
+def Laws.uber_fire_state_other():
+  {==}
+
+def Laws.uber_slot_once_state():
+  {==}
+
+def Laws.uber_pinned_state():
+  {==}
+
+def Laws.uber_derive_n_no_ops(n, b, me, o, at):
+  match n:
+    case 0n:
+      {==}
+    case 1n+p:
+      match p:
+        case 0n:
+          {==}
+        case 1n+p:
+          match p:
+            case 0n:
+              {==}
+            case 1n+p:
+              match p:
+                case 0n:
+                  {==}
+                case 1n+p:
+                  match p:
+                    case 0n:
+                      {==}
+                    case 1n+p:
+                      match p:
+                        case 0n:
+                          {==}
+                        case 1n+p:
+                          match p:
+                            case 0n:
+                              {==}
+                            case 1n+p:
+                              match p:
+                                case 0n:
+                                  {==}
+                                case 1n+p:
+                                  {==}
+
+def Laws.uber_derived_no_ops(win, st, o, at):
+  match win:
+    case True{}:
+      Laws.uber_derive_n_no_ops(UBS.Ub.kind.n(UBO.Ub.field(o, "k")), UBR.Uber.bot(st), UBS.Ub.me(st), o, at)
+    case False{}:
+      {==}
+
+def Laws.uber_superseded_nop():
+  {==}
+
+def Laws.uber_superseded_keeps():
+  {==}
+
+def Laws.uber_seed_once():
+  {==}
+
+# --- uberbot inc 3: plane_tally_*, plane_text_*, uber_home_* ---
+
+def Laws.side_work_ix_eq():
+  {==}
+
+def Laws.plane_tally_counts():
+  {==}
+
+def Laws.plane_tally_counts_rich():
+  {==}
+
+def Laws.plane_text_need_first():
+  {==}
+
+def Laws.plane_text_need_first_rich():
+  {==}
+
+def Laws.fmc_plan_plane_read_here():
+  {==}
+
+def Laws.fmc_plan_plane_read_unlinked_never_sent():
+  {==}
+
+def Laws.fmc_plane_read_allowed():
+  {==}
+
+def Laws.uber_home_takes_term():
+  {==}
+
+def Laws.uber_home_holder_nothing():
+  {==}
+
+def Laws.plane_home_button():
+  {==}
+
+def Laws.plane_home_button_held():
+  {==}
+
+def Laws.plane_list_same():
+  {==}
+
+def Laws.plane_list_same_rich():
+  {==}
+
+def Laws.launch_reports_turn_end():
+  {==}
+
+def Laws.launch_ask_at_once():
+  {==}
+
+def Laws.launch_fail_told():
+  {==}
+
+def Laws.launch_once_per_end():
+  {==}
+
+def Laws.launch_muted_quiet():
+  {==}
+
+def Laws.launch_waits_for_work():
+  {==}
+
+def Laws.launch_said_quiet():
+  {==}
+
+def Laws.launch_own_stop_quiet():
+  {==}
+
+def Laws.launch_stop_told():
+  {==}
+
+def Laws.launch_queued_in_order():
+  {==}
+
+def Laws.launch_loop_bounded():
+  {==}
+
+def Laws.launch_far_once():
+  {==}
+
+def Laws.launch_far_order():
+  {==}
+
+def Laws.launch_list_once():
+  {==}
+
+def Laws.launched_up_launcher():
+  {==}
+
+def Laws.subs_launched_live_kept():
+  {==}
+
+def Laws.notice_report_quiet():
+  {==}
+
+def Laws.launch_send_launcher():
+  {==}
+def Laws.interrupt_antigravity_stops(th, r):
+  {==}
+
+def Laws.antigravity_run_turn(th, cwd, m, s, r, i, t, u):
+  {==}
+
+def Laws.agy_mode_supervised_asks():
+  {==}
+
+def Laws.agy_mode_full_allows():
+  {==}
+
+def Laws.agy_default_api_key():
+  {==}
+
+def Laws.agy_google_warns():
+  {==}
+
+def Laws.agy_callback_needs_signin(b):
+  {==}
+
+
+# ios-snappy: nav
+def Laws.mnav_bot_sel(hub, id, tail):
+  {==}
+
+def Laws.mnav_room_local(hub, id):
+  {==}
+
+def Laws.mnav_remote_local(hub, id):
+  {==}
+
+def Laws.mnav_bot_thread(hub, id, thread, some, own):
+  %Equal.sym(Bool, String.is_empty(thread), False{}, some) : {Hb.Hubs.nav.qual(hub, MBN.MBots.nav.k(_, id, thread)) == Hb.Hubs.id(hub, thread) : String}
+  %Equal.sym(Bool, Hb.Hubs.nav.tag(thread), False{}, own) : {Bool.pick(String, _, thread, Hb.Hubs.id(hub, thread)) == Hb.Hubs.id(hub, thread) : String}
+  {==}
+
+# harness-coord: wakes
+def Laws.wake_once_per_event():
+  {==}
+
+def Laws.wake_once_drops():
+  {==}
+
+def Laws.wake_two_events_one_message():
+  {==}
+
+def Laws.wake_not_self():
+  {==}
+
+def Laws.wake_bot_thread_delivered():
+  {==}
+
+def Laws.wake_pr_merged():
+  {==}
+
+def Laws.wake_pr_repeat_quiet():
+  {==}
+
+def Laws.codec_wake_roundtrip():
+  {==}
+
+def Laws.codec_wake_dropped_roundtrip():
+  {==}
+
+def Laws.wake_message_one_paragraph():
+  {==}
+
+def Laws.wake_event_independent_of_step():
+  {==}
+
+# harness-coord: CLI path
+def Laws.clipath_keeps_current():
+  {==}
+
+def Laws.clipath_no_dupes():
+  {==}
+
+def Laws.clipath_idempotent():
+  {==}
+
+def Laws.clipath_nvm_newest_first():
+  {==}
+# ---- notif-policy ----
+
+def Laws.policy_no_alert_unless():
+  {==}
+
+def Laws.policy_settle_once():
+  {==}
+
+def Laws.policy_settle_after_launch():
+  {==}
+
+def Laws.policy_fail_person_only():
+  {==}
+
+def Laws.policy_ask_alerts():
+  {==}
+
+def Laws.policy_ask_alerted_out():
+  {==}
+
+def Laws.policy_ask_off_silent():
+  {==}
+
+def Laws.policy_merge_alerts():
+  {==}
+
+def Laws.policy_end_alerted():
+  {==}
+
+def Laws.policy_setting_off():
+  {==}
+
+def Laws.policy_all_legacy():
+  {==}
+
+def Laws.policy_link_not_person():
+  {==}
+
+def Laws.policy_person_direct():
+  {==}
+
+def Laws.notify_refuses_chatter():
+  {==}
+
+def Laws.notify_reminder_routine_only():
+  {==}
+
+def Laws.notify_needs_you_once():
+  {==}
+
+def Laws.notify_done_settles():
+  {==}
+
+def Laws.notify_setting_off():
+  {==}
+
+def Laws.desk_redraw_not_input():
+  {==}
+
+def Laws.desk_key_input(c, t, m, d, k, rest):
+  {==}
+
+def Laws.policy_phone_raises():
+  {==}
+
+def Laws.policy_phone_same_none():
+  {==}
+
+def Laws.policy_phone_empty_none():
+  {==}
+
+def Laws.policy_phone_unseen_none():
+  {==}
+
+def Laws.policy_phone_watched_held():
+  {==}
+
+def Laws.policy_phone_note_not_held():
+  {==}
+
+def Laws.policy_phone_ids_record():
+  {==}
+
+def Laws.policy_phone_frame_raises():
+  {==}
+
+def Laws.policy_phone_turn_end_quiet():
+  {==}
+
+def Laws.policy_phone_boot_quiet():
+  {==}
+
+def Laws.policy_reminder_alerts():
+  {==}
+
+def Laws.notify_rows_defaults():
+  {==}
+
+def Laws.island_compact_one_line():
+  {==}
+
+def Laws.island_no_children():
+  {==}
+
+def Laws.island_line_last_sent():
+  {==}
+
+# ---- end notif-policy ----
+
+# ---- told-rules-board ----
+def Laws.told_setting_empty_removes():
+  {==}
+
+def Laws.told_mark_key_norm():
+  {==}
+
+def Laws.told_check_finds_marked():
+  {==}
+
+def Laws.told_check_text_overlap():
+  {==}
+
+def Laws.told_prune_old():
+  {==}
+
+def Laws.told_quiet_end_marks_nothing():
+  {==}
+
+def Laws.rules_block_empty_when_none():
+  {==}
+
+def Laws.rules_block_scoped():
+  {==}
+
+def Laws.rules_refuse_enforced():
+  {==}
+
+def Laws.rules_word_unlocks():
+  {==}
+
+def Laws.rules_mcp_prefix():
+  {==}
+
+def Laws.rules_off_ignored():
+  {==}
+
+def Laws.tb_order_open_first():
+  {==}
+
+def Laws.tb_import_checkbox():
+  {==}
+
+def Laws.tb_import_idempotent():
+  {==}
+
+def Laws.tb_update_merges():
+  {==}
+
+def Laws.tb_due_shape():
+  {==}
+
+def Laws.told_report_quiet():
+  {==}
+
+def Laws.rules_report_never_unlocks():
+  {==}
+
+def Laws.rules_link_never_unlocks():
+  {==}
+
+def Laws.told_note_marked():
+  {==}
+
+def Laws.told_quiet_record_nothing():
+  {==}
+
+# ---- end told-rules-board ----
+def Laws.deploy_waits_for_tool():
+  {==}
+
+def Laws.deploy_waits_for_lock():
+  {==}
+
+def Laws.deploy_goes_when_clear():
+  {==}
+
+def Laws.deploy_go_clears_wait():
+  {==}
+
+def Laws.deploy_go_writes_done():
+  {==}
+
+def Laws.deploy_idle_nothing():
+  {==}
+
+def Laws.deploy_after_note_once():
+  {==}
+
+def Laws.deploy_after_clears():
+  {==}
+
+def Laws.deploy_after_second_start_quiet():
+  {==}
+
+def Laws.deploy_requester_bot_thread():
+  {==}
+
+def Laws.deploy_cut_requester_no_second():
+  {==}
+
+def Laws.deploy_cancel_clears():
+  {==}
+
+# harness-coord: locks
+
+def Laws.lock_exclusive(l):
+  match l:
+    case LCK.NamedLock{None{}, _, _}:
+      {==}
+    case LCK.NamedLock{Some{_}, _, _}:
+      {==}
+
+def Laws.lock_fifo(holder, first, rest):
+  {==}
+
+def Laws.lock_holder_only(l):
+  {==}
+
+def Laws.lock_release_next():
+  {==}
+
+def Laws.lock_deleted_holder_frees():
+  {==}
+
+def Laws.lock_work_releases():
+  {==}
+
+def Laws.lock_grant_once():
+  {==}
+
+def Laws.lock_ready_idempotent(l):
+  match l:
+    case LCK.NamedLock{_, _, _}:
+      {==}
+
+def Laws.codec_lock_roundtrip():
+  {==}
+# ---- phone-sch-viewer: exe path ----
+
+def Laws.exe_path_plain():
+  {==}
+
+def Laws.exe_path_deleted():
+  {==}
+
+def Laws.exe_child_plain():
+  {==}
+
+def Laws.exe_child_deleted():
+  {==}
+
+def Laws.exe_gone_plain():
+  {==}
+
+def Laws.exe_gone_deleted():
+  {==}
+
+# ---- end phone-sch-viewer: exe path ----
+
+# routines-cal
+def Laws.cal_patch_only_given():
+  {==}
+
+def Laws.cal_update_asks():
+  {==}
+
+def Laws.cal_delete_asks():
+  {==}
+
+def Laws.cal_id_no_slash():
+  {==}
+
+# routines-cal: one-time routines, zones
+def Laws.tz_fixed_wall(east, secs, t):
+  {==}
+
+def Laws.sched_done_never(s, id, bot, name, cron, prompt, on, last, created, deleted, once, tz, kind, slot, now, mo, me):
+  {==}
+
+def Laws.sched_once_due(s, id, bot, name, cron, prompt, last, created, k, tz, kind, slot, now, mo, me):
+  {==}
+
+# the machine's offset reads a schedule the same either way
+def sched_legacy_k(m: Maybe<&2, CR.Cron>, last: Nat, now: Nat, mo: Nat, me: Bool) -> {SCH.Sched.cron.due(m, last, now, mo, me) == BHS.Bots.due.k(m, last, now, BHS.Tz{mo, me}) : Bool}:
+  match m:
+    case Some{c}:
+      {==}
+    case None{}:
+      {==}
+
+def Laws.sched_legacy_same(s, id, bot, name, cron, prompt, on, last, created, deleted, kind, slot, now, mo, me):
+  match on deleted:
+    case True{} True{}:
+      {==}
+    case True{} False{}:
+      sched_legacy_k(CR.Cron.parse(cron), last, now, mo, me)
+    case False{} _:
+      {==}
+
+# a schedule is not due at a time no later than the one it last fired at
+def due_not_later(o: Cmp, +x: Nat, +now: Nat) -> {Bool.and(Cmp.is_le(o), CR.Cron.due.k(o, x, now)) == False{} : Bool}:
+  match o:
+    case LT{}:
+      {==}
+    case EQ{}:
+      {==}
+    case GT{}:
+      {==}
+
+def due_not_after(+c: CR.Cron, +last: Nat, +now: Nat, +off: Nat, +east: Bool) -> {Bool.and(Nat.is_le(now, last), CR.Cron.due(c, last, now, off, east)) == False{} : Bool}:
+  due_not_later(Nat.cmp(now, last), CR.Cron.next(c, last, off, east), now)
+
+def due_slot(+g: Bool, +w2: Nat, +slot: Nat, +wl: Nat, +c: CR.Cron) -> {Bool.and(g, Bool.and(Nat.is_le(w2, slot), CR.Cron.due(c, Bool.pick(Nat, g, slot, wl), w2, 0n, True{}))) == False{} : Bool}:
+  match g:
+    case True{}:
+      due_not_after(c, slot, w2, 0n, True{})
+    case False{}:
+      {==}
+
+def Laws.sched_zoned_once_per_slot(c, rule, last, now2, slot):
+  due_slot(Nat.is_gt(slot, 0n), TZ.Tz.wall(rule, now2), slot, TZ.Tz.wall(rule, last), c)
+
+def Laws.when_in_minutes():
+  {==}
+
+def Laws.when_in_hours():
+  {==}
+def Laws.task_secret_never_stored(v, label):
+  {==}
+
+def Laws.task_risky_needs_confirm(n, kind):
+  {==}
+
+def Laws.run_confirm_runs(n, k, r):
+  {==}
+
+def Laws.run_stuck_alerts_once(n, k, r, s):
+  {==}
+
+def Laws.run_pause_alerts(n, k, r):
+  {==}
+
+def Laws.run_stop_ends(n, k, r):
+  {==}
+
+def Laws.drive_person_locks_bot(w):
+  {==}
+
+def Laws.task_slug_nonempty(x):
+  match x:
+    case SNil{}:
+      {==}
+    case SCon{c, t}:
+      {==}
+
+def Laws.task_slug_empty():
+  {==}
+
+# gmail: replies, attachments, drafts
+def Laws.gmail_reply_subject_adds_re():
+  {==}
+
+def Laws.gmail_reply_subject_keeps_re():
+  {==}
+
+def Laws.gmail_references_appends():
+  {==}
+
+def Laws.gmail_reply_to_prefers_reply_to():
+  {==}
+
+def Laws.gmail_mime_type_pdf():
+  {==}
+
+def Laws.gmail_mime_type_default():
+  {==}
+
+def Laws.gmail_signed_plain():
+  {==}
+
+def Laws.gmail_signed_html_escapes():
+  {==}
+
+def Laws.gmail_signed_empty_unchanged():
+  {==}
+
+def Laws.gmail_draft_no_ask():
+  {==}
+
+def Laws.gmail_size_kb():
+  {==}
+
+def Laws.gmail_review_omits_empty_cc():
+  {==}
+
+def Laws.ask_head_gmail():
+  {==}
+
+def Laws.ask_head_draft():
+  {==}
+
+def Laws.ask_head_other_tool():
+  {==}
+
+def Laws.ask_head_cal_update():
+  {==}
+# end gmail: replies, attachments, drafts
+# harness-coord: deploy inflight
+def Laws.tool_open_shut_pair():
+  {==}
+
+def Laws.tool_turn_end_clears():
+  {==}
+
+def Laws.deploy_goes_between_calls():
+  {==}
+
+def Laws.deploy_waits_open_call():
+  {==}
+# ios-snappy: lost work
+
+def Laws.lostwork_exit_clears():
+  {==}
+
+def Laws.lostwork_exit_clears_off():
+  {==}
+
+def Laws.lostwork_exit_clears_running():
+  {==}
+
+def Laws.lostwork_exit_keeps_child():
+  {==}
+
+def Laws.lostwork_exit_keeps_watch():
+  {==}
+
+def Laws.lostwork_exit_island_hides():
+  {==}
+
+def Laws.lostwork_recover_none_open():
+  {==}
+
+def Laws.lostwork_recover_none_open_off():
+  {==}
+
+def Laws.lostwork_recover_none_held():
+  {==}
+
+def Laws.lostwork_recover_none_held_carried():
+  {==}
+
+def Laws.lostwork_recover_island_hides():
+  {==}
+
+def Laws.lostwork_recover_still_told():
+  {==}
+
+def Laws.lostwork_recover_nothing_left_aside():
+  {==}
+
+def Laws.lostwork_recover_old_rows_go():
+  {==}
+
+def Laws.lostwork_recover_old_rows_go_off():
   {==}

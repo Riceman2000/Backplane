@@ -236,6 +236,18 @@ struct EntryRow: View {
                 Text(entry.text).lineLimit(1).font(.callout)
             }
             .buttonStyle(.borderless)
+        // a reminder the hub delivered: a bell, Reminder, the text and when
+        case "reminder":
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "bell")
+                Text("Reminder").foregroundStyle(.tertiary)
+                Text(entry.text)
+                Spacer()
+                Text(entry.when ?? "").foregroundStyle(.tertiary)
+            }
+            .font(.caption)
+            .foregroundStyle(Color.accentColor)
+            .frame(maxWidth: .infinity, alignment: .leading)
         // a design step: shows it in the viewer
         case "step":
             Button { model.act("hist-show", entry.value ?? "") } label: {
@@ -265,8 +277,8 @@ struct EntryRow: View {
 private func subColor(_ state: String) -> Color {
     switch state {
     case "running": PhaseColor.accent
-    case "done", "reporting": PhaseColor.ok
-    case "watching", "launching": PhaseColor.accent
+    case "done", "reporting", "held": PhaseColor.ok
+    case "watching", "launching", "waiting on", "waiting": PhaseColor.accent
     case "queued": PhaseColor.faint
     case "cancelled", "cancelling": PhaseColor.warn
     default: PhaseColor.bad
@@ -306,7 +318,7 @@ struct SubsView: View {
                                     Text(r.title).lineLimit(1)
                                     Spacer(minLength: 0)
                                     if let c = r.cancel, !c.isEmpty {
-                                        Button("Stop") { model.act(c, r.id) }.font(.caption2).foregroundStyle(PhaseColor.warn).buttonStyle(.plain)
+                                        Button(c == "wake-cancel" ? "Cancel" : "Stop") { model.act(c, r.id) }.font(.caption2).foregroundStyle(PhaseColor.warn).buttonStyle(.plain)
                                     }
                                     Text(r.state).font(.caption2).foregroundStyle(subColor(r.state))
                                 }
@@ -371,7 +383,7 @@ struct AskCard: View {
             if !ask.blocks.isEmpty {
                 ScrollView { MarkdownView(blocks: ask.blocks).font(.callout) }.frame(maxHeight: 220)
             } else if !ask.detail.isEmpty {
-                Text(ask.detail).font(.caption.monospaced()).lineLimit(8).textSelection(.enabled)
+                ScrollView { Text(ask.detail).font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 300)
             }
             FlowButtons(buttons: ask.buttons) { model.act("answer", $0.value) }
         }
@@ -410,6 +422,8 @@ struct FlowButtons: View {
 struct ComposerExtras: View {
     let model: AppModel
     let thread: ThreadView
+    // an iPhone on its side: little room above the keyboard
+    @Environment(\.verticalSizeClass) private var height
 
     var body: some View {
         let atts = thread.attaching ?? []
@@ -429,24 +443,54 @@ struct ComposerExtras: View {
             .padding(.horizontal).padding(.top, 8)
         }
         if !skills.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(skills.enumerated()), id: \.element) { i, k in
-                    Button { model.act("skill", k.name) } label: {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(k.name).font(.subheadline.bold()).lineLimit(1)
-                            if !k.desc.isEmpty {
-                                Text(k.desc).font(.caption).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.leading)
+            // Bend marks the highlighted row; the first one is it only when none is marked
+            let hot = skills.firstIndex(where: { $0.on == true }) ?? 0
+            VStack(spacing: 0) {
+                Divider()
+                // up to four rows as they are, more scroll within about five
+                // (a ScrollView takes all the height offered it); on its side,
+                // a row and a half
+                let short = height == .compact
+                let rows =
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(skills.enumerated()), id: \.element) { i, k in
+                            Button { model.act("skill", k.name) } label: {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(k.name).font(.subheadline.monospaced().weight(.semibold)).lineLimit(1)
+                                    if !k.desc.isEmpty {
+                                        Text(k.desc).font(.caption).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.leading)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .padding(.leading, 12).padding(.trailing, 56).padding(.vertical, 4)
+                                .background(i == hot ? Color.accentColor.opacity(0.15) : Color.clear)
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
+                            .id(i)
+                            .accessibilityLabel(k.desc.isEmpty ? k.name : k.name + ", " + k.desc)
+                            .accessibilityAddTraits(i == hot ? [.isSelected] : [])
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(k.on ?? (i == 0) ? Color.secondary.opacity(0.15) : Color.clear)
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                if skills.count <= (short ? 1 : 4) {
+                    rows
+                } else {
+                    ScrollViewReader { proxy in
+                        ScrollView { rows }
+                            .frame(height: short ? 72 : 5 * 48)
+                            .onChange(of: hot) { _, i in withAnimation { proxy.scrollTo(i) } }
+                    }
                 }
             }
-            .padding(.vertical, 4)
+            .overlay(alignment: .topTrailing) {
+                Button { model.act("skill-close") } label: {
+                    Image(systemName: "xmark").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close suggestions")
+            }
+            .background(Color(.secondarySystemBackground))
         }
         if !atts.isEmpty || !up.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {

@@ -1,4 +1,10 @@
 import Base
+import ./src/core/tz.bend as TZ
+import ./src/core/when.bend as WH
+import ./src/core/sched.bend as SCH
+import ./src/core/exe.bend as EX
+import ./src/core/locks.bend as LCK
+import ./src/core/wake.bend as WAK
 import ./src/core/bothub.bend as BHS
 import ./src/core/bot.bend as BOT
 import ./src/core/far.bend as FR
@@ -9,10 +15,12 @@ import ./src/core/model.bend as M
 import ./src/app/viewer.bend as V
 import ./src/app/theme.bend as TH
 import ./src/core/semver.bend as SV
+import ./src/core/clipath.bend as CPA
 import ./src/app/nui.bend as N
 import ./src/app/bots.bend as BV
 import ./src/core/board.bend as B
 import ./src/core/hub.bend as H
+import ./src/core/deploy.bend as DP
 import ./src/core/cmds.bend as CM
 import ./src/core/utf8.bend as UT
 import ./src/core/refs.bend as RF
@@ -21,6 +29,7 @@ import ./src/core/apikeys.bend as AK
 import ./src/core/onboard.bend as OBD
 import ./src/core/fm.bend as FMG
 import ./src/core/acp.bend as AC
+import ./src/core/msp.bend as MSP
 import ./src/core/mcp.bend as MC
 import ./src/core/fmcp.bend as FMC
 import ./src/core/handoff.bend as HD
@@ -37,6 +46,10 @@ import ./src/gfx/raster.bend as R
 import ./src/gfx/draw.bend as D
 import ./src/app/layout.bend as L
 import ./src/core/eq.bend as Q
+import ./src/core/uber.bend as UBR
+import ./src/core/ubersync.bend as UBS
+import ./src/core/ubop.bend as UBO
+import ./src/core/plane.bend as PLN
 import ./src/core/svg.bend as SVG
 import ./src/core/icons.bend as ICO
 import ./src/core/tools.bend as TOOL
@@ -85,9 +98,19 @@ import ./src/core/emb.bend as EMB
 import ./src/core/outbox.bend as OB
 import ./src/core/live.bend as LV
 import ./src/core/farlive.bend as FLV
-import ./src/core/contain.bend as CTN
 import ./src/core/qr.bend as QR
 import ./src/core/layers.bend as LY
+import ./src/core/bom.bend as BOM
+import ./src/core/cad.bend as CAD
+import ./src/core/checks.bend as CHK
+import ./src/core/release.bend as REL
+import ./src/core/review.bend as RV
+import ./src/core/slash.bend as SL
+import ./src/core/agy.bend as AGY
+import ./src/core/told.bend as TLD
+import ./src/core/rules.bend as RLS
+import ./src/core/tboard.bend as TBD
+import ./src/core/task.bend as TSK
 
 # Backplane's rules, stated over the real code. `bend PROOF.bend` proves each
 # one. Humans own this file: an agent may add laws, never weaken or delete
@@ -2227,6 +2250,31 @@ law interrupt_grok_stops:
   for r: String
   {H.Stop.outs("grok", th, r) == [H.AgentStop{th}] : List<&2, H.Out>}
 
+law interrupt_muse_stops:
+  for +th: String
+  for r: String
+  {H.Stop.outs("muse", th, r) == [H.AgentStop{th}] : List<&2, H.Out>}
+
+# a Muse thread's turn is a Muse process (one per turn, over MSP)
+law muse_run_turn:
+  for +th: String
+  for +cwd: String
+  for +m: String
+  for +s: String
+  for +r: M.RuntimeMode
+  for i: M.InteractionMode
+  for +t: String
+  for u: String
+  {H.Hub.run.k(3n, th, cwd, "muse", m, s, r, i, t, u) == [H.MuseTurn{th, cwd, m, s, r, t}] : List<&2, H.Out>}
+
+# Muse's approval modes: supervised asks for anything its policy does not
+# allow; full access allows everything (no approval reaches the person)
+law msp_mode_supervised_asks:
+  {MSP.Msp.mode.k(0n) == "promptUnmatched" : String}
+
+law msp_mode_full_allows:
+  {MSP.Msp.mode.k(3n) == "allowAll" : String}
+
 # a retired process leaves nothing waiting: archive ends a running turn
 # (an idle thread gets no turn change), Stop, archive and an exit close
 # the asks that wait on it, a plan card stays, a delegated child's task
@@ -3695,6 +3743,12 @@ law bots_moving_cat_follows_clock:
   for +c: Nat
   {BV.Bv.warm.at("work", c) == c : Nat}
 
+# input holds the cats still for a whole Bv.calm, so their frames never
+# compete with keys or the wheel
+law bots_cats_calm_on_input:
+  for +ms: Nat
+  {BV.Bv.calm.after(ms, ms) == BV.Bv.calm() : Nat}
+
 # Threads elsewhere (far.bend)
 # ----------------------------
 # A thing on a linked machine is named by the link and its own id there,
@@ -4228,15 +4282,15 @@ law desk_unfocused_never:
   for at: Nat
   for thread: String
   for now: Nat
-  {DK.Look.sees(DK.Look{d, th, False{}, at}, thread, now) == False{} : Bool}
+  {DK.Look.sees(DK.DeskView{d, th, False{}, at}, thread, now) == False{} : Bool}
 
 # a focused desk watches its thread while in use, and stops once a window
 # passes with no word from it
 law desk_look_fresh:
-  {DK.Look.sees(DK.Look{True{}, "t", True{}, 100n}, "t", 279n) == True{} : Bool}
+  {DK.Look.sees(DK.DeskView{True{}, "t", True{}, 100n}, "t", 279n) == True{} : Bool}
 
 law desk_look_expires:
-  {DK.Look.sees(DK.Look{True{}, "t", True{}, 100n}, "t", 280n) == False{} : Bool}
+  {DK.Look.sees(DK.DeskView{True{}, "t", True{}, 100n}, "t", 280n) == False{} : Bool}
 
 # a thread a desk watches raises no push alert
 law desk_seen_holds:
@@ -5555,74 +5609,11 @@ law bots_tell_once:
   for +to: String
   for +text: String
   {BHS.Bots.tell.once(True{}, mid, remote, s, now, client, id, to, text) == H.Step.outs([H.Reply.ok(client, id)]) : H.Step}
-# Agent containment (core/contain.bend): each agent runs in a scope with a
-# memory limit; the limit is half the machine unless set, clamped between
-# 2 GiB and 90% of it, and a test's MiB setting is taken as it is; a scope
-# that ended in an out-of-memory kill gives the turn its words. The laws
-# count in a unit that is 4 to a GiB, so no big number is normalized.
-law contain_default_half:
-  {CTN.Contain.units(64n, 0n, 0n, 4n) == 32n : Nat}
-
-law contain_clamp_min:
-  {CTN.Contain.units(10n, 0n, 0n, 4n) == 8n : Nat}
-
-law contain_clamp_max:
-  {CTN.Contain.units(64n, 100n, 0n, 4n) == 57n : Nat}
-
-law contain_set_gib:
-  {CTN.Contain.units(64n, 5n, 0n, 4n) == 20n : Nat}
-
-law contain_test_mib:
-  {CTN.Contain.units(64n, 5n, 3n, 4n) == 3n : Nat}
-
-law contain_unit_safe:
-  {CTN.Contain.unit("t/1 x", "17-9") == "bp-agent-t_1_x-17-9" : String}
-
-law contain_oom_words:
-  {CTN.Contain.exit_text(137, "oom-kill", "200M") == "agent ran out of memory (limit 200 MB)" : String}
-
-law contain_plain_exit:
-  {CTN.Contain.exit_text(3, "success", "200M") == "agent exited with code 3" : String}
-
-law contain_words_gb:
-  {CTN.Contain.words.g(12n, 4n) == "3 GB" : String}
-
-# The scope's own answer (systemctl show: Result and MemoryMax) is read in
-# the process's reader, off the hub's inbox, and gives an out-of-memory end
-# its words with the limit the scope held; any other end gives "". Bytes
-# are counted in a unit of 4 to a MiB here.
-law contain_why_oom:
-  {CTN.Contain.why.b("Result=oom-kill\nMemoryMax=800\n", 137, 4n) == "agent ran out of memory (limit 200 MB)" : String}
-
-law contain_why_plain:
-  {CTN.Contain.why.b("Result=success\nMemoryMax=800\n", 137, 4n) == "" : String}
-
-law contain_why_missing:
-  {CTN.Contain.why.b("", 137, 4n) == "" : String}
-
-# Retiring an agent stops its whole scope (what it started dies with it),
-# and a start stops the scopes a previous run left: the units `list-units`
-# names, whose thread (the name without "bp-agent-" and the generation's two
-# parts) is one of the log's.
-law contain_stop_scope:
-  {String.join(CTN.Contain.stop.args("bp-agent-t1-2-3-4"), " ") == "10 systemctl --user stop bp-agent-t1-2-3-4.scope" : String}
-
-law contain_stale_units:
-  {String.join(CTN.Contain.stale("bp-agent-t1-5-100-7.scope loaded active running [systemd-run] sleep\nother.scope loaded active running x\nbp-agent-t3-1-9-3.scope loaded failed failed z\n"), ",") == "bp-agent-t1-5-100-7,bp-agent-t3-1-9-3" : String}
-
-law contain_thread_of:
-  {CTN.Contain.thread.of("bp-agent-t17-5-100-7") == "t17-5" : String}
-
-# systemd-run expands ${VAR} in the arguments it is given, so the scope's
-# script turns that off (and, for a systemd without the flag, writes each
-# $ as $$): a prompt's dollar text reaches the agent as it is.
-law contain_no_expand:
-  {Bool.and(String.contains(CTN.Contain.script(), "--expand-environment=no"), String.contains(CTN.Contain.script(), "s/\\$/$$/g")) == True{} : Bool}
-
-# a hub stops only the scopes it started: one whose description names
-# another home is not its own
-law contain_tag_mine:
-  {CTN.Contain.stale.mine("bp-agent-t1-1-1.scope loaded active running backplane /h\nbp-agent-t2-1-1.scope loaded active running backplane /other\nbp-agent-t3-1-1.scope loaded failed failed [systemd-run] sleep 3\n", CTN.Contain.tag("/h")) == ["bp-agent-t1-1-1"] : List<&2, String>}
+# An agent's process ended by SIGKILL (137) is told as most likely out of
+# memory; any other end says its exit code (Exit.why gives ""). Backplane
+# picks the thread back up either way.
+law exit_why_killed:
+  {H.Exit.why(137) ++ "|" ++ H.Exit.why(3) == "agent was killed (signal 9, likely out of memory)|" : String}
 
 # A streamed reply's settled prefix (client.bend's Live.head: the text up
 # to the last blank line outside a fenced block) renders, and lays out,
@@ -5701,9 +5692,10 @@ law onboard_next_step:
 law onboard_back_step:
   {OBD.Ob.back(3n) == 2n : Nat}
 
-# next from the last step ends it, and the end stays the end
+# next from the last step ends it, and the end stays the end. Stated for
+# whatever the step count is: the last step is `count - 1`, not a number
 law onboard_next_ends:
-  {OBD.Ob.live(OBD.Ob.next(8n)) == False{} : Bool}
+  {OBD.Ob.live(OBD.Ob.next(Nat.sub(OBD.Ob.count(), 1n))) == False{} : Bool}
 
 law onboard_end_stays:
   {OBD.Ob.next(OBD.Ob.count()) == OBD.Ob.count() : Nat}
@@ -5759,8 +5751,9 @@ law onboard_syms:
 def OnbUi.log() -> M.State:
   M.State.replay([M.ProjectCreated{"p1", "p", "/p", 1n}], M.State.empty())
 
+# a tour finished with every step answered (onboard.uber too)
 def OnbUi.done() -> M.State:
-  M.State.replay([M.ProjectCreated{"p1", "p", "/p", 1n}, M.SettingSet{"onboard.done", "1", 2n}], M.State.empty())
+  M.State.replay([M.ProjectCreated{"p1", "p", "/p", 1n}, M.SettingSet{"onboard.done", "1", 2n}, M.SettingSet{"onboard.uber", "1", 2n}], M.State.empty())
 
 def OnbUi.synced(st: M.State) -> U.Ui:
   U.Ui.scratch_set(U.Ui.adopt.raw(U.Ui.init(1n), st), "@sync", "1")
@@ -6401,3 +6394,1353 @@ law lyr_kind_base:
 # not kept and never the active one
 law lyr_masks_only:
   {LY.Masks.off(LY.Lyr.masks(0, 4096, LY.Focus{12, 2})) == 37736447 : U32}
+
+# Design review: comparing (core/hist.bend, client.bend's Rv.*)
+# ---------------------------------------------------------------
+
+# a comparison on no layers in particular is the plain comparison, and
+# marks every layer
+law rv_diff_on_all:
+  for a: String
+  for b: String
+  {HS.Hist.diff.on(a, b, 0) == HS.Hist.diff(a, b) : String}
+
+law rv_mark_on_all:
+  for olds: List<&2, B.Item>
+  for news: List<&2, B.Item>
+  {HS.Hist.mark.on(0, olds, news) == HS.Hist.mark(olds, news) : List<&2, B.Item>}
+
+# a sheet picked outside a comparison is the sheet; inside one, that sheet
+# compared in both versions
+law rv_sheet_plain:
+  {U.Rv.sheet("/t/root.kicad_sch", "/t/kid.kicad_sch") == "/t/kid.kicad_sch" : String}
+
+law rv_sheet_compared:
+  {U.Rv.sheet(HS.Hist.diff(HS.Hist.git("/g", "c", "/t", "root.kicad_sch"), "/t/root.kicad_sch"), "/t/kid.kicad_sch") == HS.Hist.diff(HS.Hist.git("/g", "c", "/t", "kid.kicad_sch"), "/t/kid.kicad_sch") : String}
+
+# with no layer standing out, a comparison is about every layer
+law rv_bits_plain:
+  for kind: U32
+  {U.Rv.bits(kind, LY.Lyr.plain()) == 0 : U32}
+# Design review (bom)
+
+# references sort naturally: C2 before C10, and R10 after R2
+law bom_nat_c2_c10:
+  {BOM.Bom.before("C2", "C10") == True{} : Bool}
+
+law bom_nat_r10_r2:
+  {BOM.Bom.before("R10", "R2") == False{} : Bool}
+
+# a BOM compared with itself has no changes
+law bom_diff_self:
+  {BOM.Bom.diff(BOM.Bom.sample(), BOM.Bom.sample()) == Nil{} : List<&2, BOM.Chg>}
+
+# every BOM line's quantity is the number of its references
+law bom_group_qty:
+  {BOM.Bom.qty.ok(BOM.Bom.group(BOM.Bom.sample())) == True{} : Bool}
+
+# R1 and R2 are alike: one line "R1, R2" with quantity 2
+law bom_group_csv:
+  {BOM.Bom.csv(BOM.Bom.group(BOM.Bom.sample())) == "Reference,Qty,Value,Footprint,MPN,Manufacturer,DNP\nC1,1,1u,0402,,,\n\"R1, R2\",2,10k,0603,,,\n" : String}
+
+# a cell with a comma is quoted, a quote is doubled, a plain one is left
+law bom_csv_quote:
+  {BOM.Bom.q("a,b") == "\"a,b\"" : String}
+
+law bom_csv_quote_inner:
+  {BOM.Bom.q("5\" x") == "\"5\"\" x\"" : String}
+
+law bom_csv_plain:
+  {BOM.Bom.q("10k") == "10k" : String}
+
+# the diff summary line
+law bom_diff_line:
+  {BOM.Bom.line(3n, 1n, 2n) == "3 added, 1 removed, 2 changed" : String}
+
+law bom_diff_md_none:
+  {BOM.Bom.diff.md(BOM.Bom.sample(), BOM.Bom.sample()) == "No changes" : String}
+
+# a pipe in a cell is escaped
+law bom_md_pipe:
+  {BOM.Bom.c("a|b") == "a/b" : String}
+# Design review (checks, cad, release)
+# -------------------------------------
+
+# The CAD layer knows a KiCad board by its extension
+law cad_of_kicad_board:
+  {CAD.Cad.of("a/b.kicad_pcb") == CAD.Hit{"kicad", "board", True{}} : CAD.Hit}
+
+law cad_of_kicad_schematic:
+  {CAD.Cad.of("x.kicad_sch") == CAD.Hit{"kicad", "schematic", True{}} : CAD.Hit}
+
+law cad_of_case_ignored:
+  {CAD.Cad.of("X.KICAD_PRO") == CAD.Hit{"kicad", "project", True{}} : CAD.Hit}
+
+# a tool Backplane cannot run is recognised but marked not drawn
+law cad_of_altium_not_drawn:
+  {CAD.Cad.of("Main.PcbDoc") == CAD.Hit{"altium", "board", False{}} : CAD.Hit}
+
+law cad_of_unknown:
+  {CAD.Cad.of("readme.md") == CAD.Hit{"", "", False{}} : CAD.Hit}
+
+# a template's placeholders are replaced by their values
+law cad_fill_puts_vars_in:
+  {CAD.Cad.fill(["{cli}", "{out}/x.csv"], [CAD.Var{"cli", "k"}, CAD.Var{"out", "/o"}]) == ["k", "/o/x.csv"] : List<&2, String>}
+
+# a brace that names no variable passes through (KiCad's ${QUANTITY})
+law cad_fill_keeps_other_braces:
+  {CAD.Cad.fill(["${QUANTITY}"], [CAD.Var{"cli", "k"}]) == ["${QUANTITY}"] : List<&2, String>}
+
+# a single quote inside a word is written '\'' so sh reads it back
+law cad_shell_quotes_a_quote:
+  {CAD.Cad.quote("a'b") == "'a'\\''b'" : String}
+
+law cad_shell_words:
+  {CAD.Cad.shell(["a", "b c"]) == "'a' 'b c'" : String}
+
+# ticking a box and ticking it again gives the file back, byte for byte
+law checklist_toggle_twice:
+  {CHK.Checklist.toggle(CHK.Checklist.toggle("# A\n- [ ] x\n* [x] y\n", 1n), 1n) == "# A\n- [ ] x\n* [x] y\n" : String}
+
+law checklist_toggle_flips_one:
+  {CHK.Checklist.toggle("# A\n- [ ] x\n* [x] y\n", 1n) == "# A\n- [ ] x\n* [ ] y\n" : String}
+
+# a box that is not there changes nothing
+law checklist_toggle_past_end:
+  {CHK.Checklist.toggle("- [ ] x\n", 5n) == "- [ ] x\n" : String}
+
+# with no findings the gate passes
+law checks_gate_no_findings:
+  {CHK.Checks.gate(Nil{}, CHK.Checks.gate.default()) == "" : String}
+
+law checks_gate_no_findings_strict:
+  {CHK.Checks.gate(Nil{}, CHK.Gate{"warning", "warning", True{}}) == "" : String}
+
+law checks_md_empty:
+  {CHK.Checks.md(Nil{}, Nil{}, Nil{}) == "**Design checks:** No findings\n" : String}
+
+# an ERC report's violation becomes one finding of its severity
+law checks_erc_error_counted:
+  {CHK.Checks.count(CHK.Checks.erc("{\"sheets\":[{\"path\":\"/\",\"violations\":[{\"type\":\"t\",\"severity\":\"error\",\"description\":\"d\",\"items\":[]}]}]}"), "erc", "error") == 1n : Nat}
+
+# the next tag counts on from the newest one
+law release_next_dotted:
+  {REL.Release.next(["v1.1", "v1.2"]) == "v1.3" : String}
+
+law release_next_letter:
+  {REL.Release.next(["rev-A"]) == "rev-B" : String}
+
+law release_next_plain:
+  {REL.Release.next(["r7"]) == "r8" : String}
+
+law release_next_first:
+  {REL.Release.next(Nil{}) == "v1" : String}
+
+law release_tag_valid:
+  {REL.Release.valid("v1.2") == True{} : Bool}
+
+# git refuses these as tag names
+law release_tag_no_space:
+  {REL.Release.valid("a b") == False{} : Bool}
+
+law release_tag_no_dotdot:
+  {REL.Release.valid("a..b") == False{} : Bool}
+
+law release_tag_no_dash_lead:
+  {REL.Release.valid("-x") == False{} : Bool}
+
+law release_tag_no_lock_end:
+  {REL.Release.valid("x.lock") == False{} : Bool}
+
+law release_tag_not_empty:
+  {REL.Release.valid("") == False{} : Bool}
+
+# a release's outputs live in the repo's .backplane/releases/<tag>
+law release_dir_in_repo:
+  {REL.Release.dir("/r", "v1") == "/r/.backplane/releases/v1" : String}
+
+law release_gh_command:
+  {REL.Release.gh("v1", "n.md", ["f"]) == ["gh", "release", "create", "v1", "--title", "v1", "--notes-file", "n.md", "--verify-tag", "f"] : List<&2, String>}
+# Design review (review.bend)
+
+# no ops, no comments, and nothing to tell an agent
+law review_fold_empty:
+  {RV.Review.fold([]) == [] : List<&2, RV.Comment>}
+
+law review_prompt_none:
+  {RV.Review.prompt([]) == "" : String}
+
+# an op on an id nobody added changes nothing
+law review_unknown_ignored:
+  {RV.Review.fold([RV.Resolve{"zz", "p"}, RV.Edit{"zz", "x"}, RV.Drop{"zz"}]) == [] : List<&2, RV.Comment>}
+
+# add, then resolve: not open any more
+law review_resolve:
+  {RV.Review.count.open(RV.Review.fold([RV.Add{RV.Review.mk("a", "")}, RV.Resolve{"a", "p"}])) == 0n : Nat}
+
+# resolve, then reopen: open again
+law review_reopen:
+  {RV.Review.count.open(RV.Review.fold([RV.Add{RV.Review.mk("a", "")}, RV.Resolve{"a", "p"}, RV.Reopen{"a", "p"}])) == 1n : Nat}
+
+# a resolved comment is told to no agent
+law review_prompt_resolved:
+  {RV.Review.prompt(RV.Review.fold([RV.Add{RV.Review.mk("a", "")}, RV.Resolve{"a", "p"}])) == "" : String}
+
+# drop removes the comment and the replies to it
+law review_drop:
+  {RV.Review.fold([RV.Add{RV.Review.mk("a", "")}, RV.Add{RV.Review.mk("b", "a")}, RV.Drop{"a"}]) == [] : List<&2, RV.Comment>}
+
+# a reply joins its root and is no pin of its own
+law review_reply_no_pin:
+  {List.length(&2, RV.Pin, RV.Review.pins(RV.Review.fold([RV.Add{RV.Review.mk("a", "")}, RV.Add{RV.Review.mk("b", "a")}]), "f", "")) == 1n : Nat}
+
+law review_reply_counted:
+  {RV.Review.pin.count(RV.Rv.pin(RV.Review.fold([RV.Add{RV.Review.mk("a", "")}, RV.Add{RV.Review.mk("b", "a")}]), RV.Review.mk("a", ""))) == 1n : Nat}
+
+# a reply to nothing is dropped
+law review_orphan_ignored:
+  {RV.Review.fold([RV.Add{RV.Review.mk("b", "a")}]) == [] : List<&2, RV.Comment>}
+
+# an op (but an add, whose numbers print as floats) reads back the same
+law review_roundtrip_resolve:
+  {RV.Review.op.of("resolve", RV.Review.op.resolve("c1", "claude"), 3n) == Some{RV.Resolve{"c1", "claude"}} : Maybe<&2, RV.Op>}
+
+law review_roundtrip_edit:
+  {RV.Review.op.of("edit", RV.Review.op.edit("c1", "a b"), 3n) == Some{RV.Edit{"c1", "a b"}} : Maybe<&2, RV.Op>}
+
+law review_roundtrip_drop:
+  {RV.Review.op.of("drop", RV.Review.op.drop("c1"), 3n) == Some{RV.Drop{"c1"}} : Maybe<&2, RV.Op>}
+
+# an Act of another tone is no review op
+law review_other_tone:
+  {RV.Review.of(M.Act{"x", "t", "tool", "add", "{}", 1n}) == None{} : Maybe<&2, RV.Op>}
+
+# a pin moved only when its item is among the changed
+law review_moved:
+  {RV.Review.moved(RV.Review.mk("a", ""), ["i"]) == True{} : Bool}
+
+law review_not_moved:
+  {RV.Review.moved(RV.Review.mk("a", ""), ["j"]) == False{} : Bool}
+# Slash commands in the composer (slash.bend)
+law slash_typing_word:
+  {SL.Slash.typing("/gi") == True{} : Bool}
+
+law slash_typing_alone:
+  {SL.Slash.typing("/") == True{} : Bool}
+
+law slash_not_after_space:
+  {SL.Slash.typing("/give >a") == False{} : Bool}
+
+law slash_not_midline:
+  {SL.Slash.typing("hi /gi") == False{} : Bool}
+
+law slash_claude_prefix:
+  {SL.Slash.names(SL.Slash.cmds(True{}, "c")) == ["/compact", "/context"] : List<&2, String>}
+
+law slash_others_own_only:
+  {SL.Slash.names(SL.Slash.cmds(False{}, "")) == ["/btw", "/give"] : List<&2, String>}
+
+law slash_none_unknown:
+  {SL.Slash.names(SL.Slash.cmds(True{}, "zz")) == [] : List<&2, String>}
+
+# --- uberbot: uber_*, plane_* (thread t1791834693) ---
+
+# a bot on another machine is never made the uberbot, and nothing is logged
+law uber_promote_far_refused:
+  for +st: M.State
+  {UBR.Promo.log(UBR.Uber.promote(st, "p1~b9", "u1-a", 5n)) == Nil{} : List<&2, M.Change>}
+
+# a demotion leaves no uberbot
+law uber_demote_clears:
+  {UBR.Uber.bot(M.State.replay([M.UberSet{"b1", "u1-a", 5n}, M.UberSet{"", "", 6n}], UBR.Uber.demo())) == "" : String}
+
+# a promotion of a live bot of this machine makes it the uberbot
+law uber_promote_sets:
+  {UBR.Uber.bot(M.State.replay([M.UberSet{"b2", "u1-a", 5n}], UBR.Uber.demo())) == "b2" : String}
+
+# the uberbot already promoted is not promoted again
+law uber_promote_again_nothing:
+  {UBR.Promo.log(UBR.Uber.promote(M.State.replay([M.UberSet{"b2", "u1-a", 5n}], UBR.Uber.demo()), "b2", "u2-b", 6n)) == Nil{} : List<&2, M.Change>}
+
+# each thread and bot row of the status plane is there once
+law plane_each_once:
+  for +u: U.Ui
+  for +ix: U.SIx
+  for +now: Nat
+  {ON.Once.distinct(ON.Once.keys(PLN.PRow, PLN.Plane.all.keyed(u, ix, now))) == True{} : Bool}
+
+# and in the sections, no thread in two of them
+law plane_sections_once:
+  {ON.Once.distinct(PLN.Plane.threads.ids(PLN.Plane.of(PLN.Plane.demo(), 200000n))) == True{} : Bool}
+
+# what waits on the person comes in urgency order
+law plane_need_ranked:
+  {PLN.Plane.ranked(PLN.Plane.need(PLN.Plane.of(PLN.Plane.demo(), 200000n))) == True{} : Bool}
+
+# a click on a thread's row selects that thread
+law plane_hit_opens:
+  for +t: M.Thread
+  for +at: Nat
+  for +pt: String
+  for +u: U.Ui
+  for +ix: U.SIx
+  for +st: M.State
+  {PLN.Plane.hit(PLN.Plane.thread.t(t, at, pt, u, ix, st)) == "select " ++ M.Thread.id(t) : String}
+
+# --- uberbot onboarding: onboard_uber_* ---
+
+# the tour's last step, shown for a state; its choices as "action value;"
+def OnbUber.step(st: M.State) -> U.Ui:
+  U.Ui.scratch_set(U.Ui.scratch_set(U.Ui.adopt.raw(U.Ui.init(1n), st), "@sync", "1"), "@tour", "9")
+
+def OnbUber.acts(cs: List<&2, U.TChoice>) -> String:
+  match cs:
+    case Nil{}:
+      ""
+    case U.TChoice{_, a, v} <> t:
+      a ++ " " ++ v ++ ";" ++ OnbUber.acts(t)
+
+# Kit said once, Pip and Zed three times (Pip older), none an uberbot
+def OnbUber.bots() -> M.State:
+  M.State.replay([M.ThreadCreated{"t1", "", "Kit", M.Local{}, "", "", "claude", "", 100n}, M.BotSet{"b1", "Kit", "t1", 7n, "", 100n},
+    M.ThreadCreated{"t2", "", "Pip", M.Local{}, "", "", "claude", "", 101n}, M.BotSet{"b2", "Pip", "t2", 8n, "", 101n},
+    M.ThreadCreated{"t3", "", "Zed", M.Local{}, "", "", "claude", "", 102n}, M.BotSet{"b3", "Zed", "t3", 9n, "", 102n},
+    M.MessagePosted{"t1", "m1", M.User{}, "a", 110n},
+    M.MessagePosted{"t2", "m2", M.User{}, "a", 111n}, M.MessagePosted{"t2", "m3", M.User{}, "b", 112n}, M.MessagePosted{"t2", "m4", M.User{}, "c", 113n},
+    M.MessagePosted{"t3", "m5", M.User{}, "a", 114n}, M.MessagePosted{"t3", "m6", M.User{}, "b", 115n}, M.MessagePosted{"t3", "m7", M.User{}, "c", 116n}], M.State.empty())
+
+def OnbUber.first(cs: List<&2, U.TChoice>) -> String:
+  OnbUber.acts(List.take(&2, U.TChoice, cs, 1n))
+
+# with no bots here the only choice makes the uberbot
+law onboard_uber_none_creates:
+  {OnbUber.acts(U.Tour.choices(OnbUber.step(OnbUi.log()))) == "uber-new ;" : String}
+
+# with bots and no uberbot the first choice promotes the one used most
+# (ties: the oldest)
+law onboard_uber_pick_most_used:
+  {OnbUber.first(U.Tour.choices(OnbUber.step(OnbUber.bots()))) == "uber-promote b2;" : String}
+
+# with an uberbot the step offers nothing to choose
+law onboard_uber_have_quiet:
+  {List.is_empty(&2, U.TChoice, U.Tour.choices(OnbUber.step(M.State.replay([M.UberSet{"b1", "u1-a", 200n}], OnbUber.bots())))) == True{} : Bool}
+
+# an install that finished the tour before the uberbot step, with no
+# uberbot: the step comes up alone, once its state has arrived ...
+def OnbUber.old() -> M.State:
+  M.State.replay([M.ProjectCreated{"p1", "p", "/p", 1n}, M.SettingSet{"onboard.done", "1", 2n}], M.State.empty())
+
+law onboard_uber_existing_shows:
+  {U.Tour.at(OnbUi.synced(OnbUber.old())) == OBD.Ob.uber() : Nat}
+
+# ... never from a cached state
+law onboard_uber_existing_cached:
+  {U.Tour.at(U.Ui.adopt.raw(U.Ui.init(1n), OnbUber.old())) == OBD.Ob.count() : Nat}
+
+# once answered it does not come up by itself
+law onboard_uber_answered_quiet:
+  {U.Tour.at(OnbUi.synced(M.State.replay([M.SettingSet{"onboard.uber", "1", 3n}], OnbUber.old()))) == OBD.Ob.count() : Nat}
+
+# nor with an uberbot
+law onboard_uber_have_no_ask:
+  {U.Tour.at(OnbUi.synced(M.State.replay([M.UberSet{"b1", "u1-a", 200n}], M.State.replay([M.SettingSet{"onboard.done", "1", 2n}], OnbUber.bots())))) == OBD.Ob.count() : Nat}
+
+# Skip answers it, and a step asked alone has no Back
+law onboard_uber_skip_answers:
+  {U.Tour.answered(U.Ui.state(OnbUi.after(U.Ui.act(OnbUi.synced(OnbUber.old()), "ob-skip", "")))) == True{} : Bool}
+
+law onboard_uber_single_no_back:
+  {U.Tour.back(OnbUi.synced(OnbUber.old())) == False{} : Bool}
+
+# the phone's status plane lists each row once, whichever hubs reported it
+law hubs_plane_once:
+  for +rs: List<&2, J.Json>
+  {ON.Once.distinct(ON.Once.keys(J.Json, Hb.Hubs.pl.keyed(rs))) == True{} : Bool}
+# --- uberbot sync: uber_merge_*, uber_*_term, uber_fire_*, uber_slot_once, uber_derived_no_ops (SPEC-2) ---
+
+# two machines' ops on one key, in either order, leave the same registers
+law uber_merge_comm:
+  {UBS.Ub.demo.fold([UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.mem("color", "fact", "blue", "")), UBS.Ub.demo.op("mB", 1n, 1001n, UBO.Ub.b.mem("color", "fact", "red", ""))]) == UBS.Ub.demo.fold([UBS.Ub.demo.op("mB", 1n, 1001n, UBO.Ub.b.mem("color", "fact", "red", "")), UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.mem("color", "fact", "blue", ""))]) : String}
+
+# an op taken twice is taken once
+law uber_merge_idem:
+  {UBS.Ub.demo.fold([UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.mem("color", "fact", "blue", "")), UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.mem("color", "fact", "blue", ""))]) == UBS.Ub.demo.fold([UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.mem("color", "fact", "blue", ""))]) : String}
+
+# a forget is a tombstone in the memory's register: a later one beats the save it follows, in either order
+law uber_forget_wins_older:
+  {M.Setting.get(M.State.replay([UBS.Ub.demo.op("mB", 1n, 1001n, UBO.Ub.b.forget("color")), UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.mem("color", "fact", "blue", ""))], UBS.Ub.demo.a()), "uber.r.u1-x.mem:color", "-") == UBO.Ub.b.forget("color") : String}
+
+# and an older forget does not beat a later save
+law uber_forget_loses_newer:
+  {M.Setting.get(M.State.replay([UBS.Ub.demo.op("mA", 1n, 1002n, UBO.Ub.b.mem("color", "fact", "blue", "")), UBS.Ub.demo.op("mB", 1n, 1001n, UBO.Ub.b.forget("color"))], UBS.Ub.demo.a()), "uber.r.u1-x.mem:color", "-") == UBO.Ub.b.mem("color", "fact", "blue", "") : String}
+
+# two machines taking the same term leave one holder, the same in either order
+law uber_one_holder_per_term:
+  {UBS.Ub.holder(M.State.replay([UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.lease("mA", 2n)), UBS.Ub.demo.op("mB", 1n, 1001n, UBO.Ub.b.lease("mB", 2n))], UBS.Ub.demo.a())) ++ UBS.Ub.holder(M.State.replay([UBS.Ub.demo.op("mB", 1n, 1001n, UBO.Ub.b.lease("mB", 2n)), UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.lease("mA", 2n))], UBS.Ub.demo.a())) == "mBmB" : String}
+
+# a higher term holds against a later stamp
+law uber_higher_term_wins:
+  {UBS.Ub.holder(M.State.replay([UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.lease("mA", 3n)), UBS.Ub.demo.op("mB", 1n, 2000n, UBO.Ub.b.lease("mB", 2n))], UBS.Ub.demo.a())) ++ UBS.Ub.holder(M.State.replay([UBS.Ub.demo.op("mB", 1n, 2000n, UBO.Ub.b.lease("mB", 2n)), UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.lease("mA", 3n))], UBS.Ub.demo.a())) == "mAmA" : String}
+
+# an unpinned routine runs where the conversation is held and nowhere else
+law uber_fire_holder_only:
+  for +mine: Bool
+  for +holder: Bool
+  {UBS.Ub.fires.k(False{}, mine, holder, True{}) == holder : Bool}
+
+# a pinned routine runs on its machine, whoever holds the conversation
+law uber_pinned_stays:
+  for +mine: Bool
+  for +holder: Bool
+  {UBS.Ub.fires.k(True{}, mine, holder, True{}) == mine : Bool}
+
+# a slot already run never runs again
+law uber_slot_once:
+  for +pinned: Bool
+  for +mine: Bool
+  for +holder: Bool
+  {UBS.Ub.fires.k(pinned, mine, holder, False{}) == False{} : Bool}
+
+# the same on a machine's own state: A holds and fires; B does not; neither fires a slot that ran
+law uber_fire_state:
+  {UBS.Ub.fires(M.State.replay([UBS.Ub.demo.op("mA", 1n, 900n, UBO.Ub.b.lease("mA", 1n))], UBS.Ub.demo.a()), "mA:r1", 5000n) == True{} : Bool}
+
+law uber_fire_state_other:
+  {UBS.Ub.fires(M.State.replay([UBS.Ub.demo.op("mA", 1n, 900n, UBO.Ub.b.lease("mA", 1n))], UBS.Ub.demo.b()), "mA:r1", 5000n) == False{} : Bool}
+
+law uber_slot_once_state:
+  {UBS.Ub.fires(M.State.replay([UBS.Ub.demo.op("mA", 1n, 900n, UBO.Ub.b.lease("mA", 1n)), UBS.Ub.demo.op("mA", 2n, 5001n, UBO.Ub.b.fired("mA:r1", 5000n))], UBS.Ub.demo.a()), "mA:r1", 5000n) == False{} : Bool}
+
+law uber_pinned_state:
+  {UBS.Ub.fires(M.State.replay([UBS.Ub.demo.op("mA", 1n, 900n, UBO.Ub.b.lease("mA", 1n)), UBS.Ub.demo.op("mA", 2n, 901n, UBO.Ub.b.routine("mA:r1", "R", "daily 09:00", "p", True{}, "mB"))], UBS.Ub.demo.b()), "mA:r1", 5000n) == True{} : Bool}
+
+# for any kind of op, what is derived is not an op
+law uber_derive_n_no_ops:
+  for n: Nat
+  for +b: String
+  for +me: String
+  for +o: J.Json
+  for +at: Nat
+  {UBS.Ub.noops(UBS.Ub.derive.n(n, b, me, o, at)) == True{} : Bool}
+
+# what an op does to the replica is never an op
+law uber_derived_no_ops:
+  for +win: Bool
+  for +st: M.State
+  for +o: J.Json
+  for +at: Nat
+  {UBS.Ub.noops(UBS.Ub.derive.k(win, st, o, at)) == True{} : Bool}
+
+# an op a later one superseded is kept as a nop, and the register holds the later one
+law uber_superseded_nop:
+  {M.Setting.get(M.State.replay([UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.mem("color", "fact", "blue", "")), UBS.Ub.demo.op("mB", 1n, 1001n, UBO.Ub.b.mem("color", "fact", "red", ""))], UBS.Ub.demo.a()), "uber.op.u1-x.mA.1", "-") == UBO.Ub.line.nop("u1-x", "mA", 1n, UBO.Ub.stamp.make(1000n, 0n, "mA")) : String}
+
+law uber_superseded_keeps:
+  {M.Setting.get(M.State.replay([UBS.Ub.demo.op("mA", 1n, 1000n, UBO.Ub.b.mem("color", "fact", "blue", "")), UBS.Ub.demo.op("mB", 1n, 1001n, UBO.Ub.b.mem("color", "fact", "red", ""))], UBS.Ub.demo.a()), "uber.r.u1-x.mem:color", "-") == UBO.Ub.b.mem("color", "fact", "red", "") : String}
+
+# an uberbot promoted before ops existed is seeded once: its first ops are logged, and none again after they are folded
+law uber_seed_once:
+  {UBS.Ub.seed.n(UBS.Ub.demo.a(), 3000n) == "3,0" : String}
+
+# --- uberbot inc 3: plane_tally_*, plane_text_*, uber_home_* ---
+
+# a thread's rows from the index (one pass over the settings) are the rows its own lookups find
+law side_work_ix_eq:
+  {U.Side.phases.ix(U.Ui.threads(U.Side.demo.work()), U.Side.ix(U.Side.demo.work()), U.Side.demo.work()) == U.Side.phases(U.Ui.threads(U.Side.demo.work()), U.Side.demo.work()) : List<&2, M.Phase>}
+
+# the count the phones' list makes without building rows is the plane's count
+law plane_tally_counts:
+  {PLN.Plane.tally.same(PLN.Plane.demo(), 200000n) == True{} : Bool}
+
+# also when threads are need or run by a pending tool, a queued message, background rows or a child task
+law plane_tally_counts_rich:
+  {PLN.Plane.tally.same(PLN.Plane.demo.rich(), 200000n) == True{} : Bool}
+
+# plane_read: every need row comes before every run row in the text
+law plane_text_need_first:
+  {PLN.Plane.text.need_first(PLN.Plane.of(PLN.Plane.demo(), 200000n), 200000n) == True{} : Bool}
+
+law plane_text_need_first_rich:
+  {PLN.Plane.text.need_first(PLN.Plane.of(PLN.Plane.demo.rich(), 200000n), 200000n) == True{} : Bool}
+
+# plane_read names no machine: this hub reads its own; one it names (and none is linked) is never sent
+law fmc_plan_plane_read_here:
+  {FMC.Fm.plan.name(FMC.Fm.plan.o(Fx.call("plane_read", J.Json.obj(Nil{})), M.State.empty(), Nil{}, "t0")) == "here" : String}
+
+law fmc_plan_plane_read_unlinked_never_sent:
+  {FMC.Fm.plan.name(FMC.Fm.plan.o(Fx.call("plane_read", J.Json.obj([J.KV{"machine", J.Str{"beta"}}])), M.State.empty(), Nil{}, "t0")) == "answer" : String}
+
+# an owner takes plane_read from its machines
+law fmc_plane_read_allowed:
+  {FMC.Fm.allowed(Fx.ask("plane_read")) == True{} : Bool}
+
+# "Make this the home": this machine takes the lease one term on
+law uber_home_takes_term:
+  {UBS.Ub.home.after(UBS.Ub.demo.away(), 2000n) == "mA,3" : String}
+
+# and does nothing where it holds it already, where no lease was ever taken, or with no uberbot
+law uber_home_holder_nothing:
+  {Nat.add(Nat.add(UBS.Ub.home.count(UBS.Ub.demo.a(), 2000n), UBS.Ub.home.count(M.State.replay([UBS.Ub.demo.op("mA", 1n, 1001n, UBO.Ub.b.lease("mA", 2n))], UBS.Ub.demo.a()), 2000n)), UBS.Ub.home.count(M.State.empty(), 2000n)) == 0n : Nat}
+
+# the Status strip offers "Make this the home" where the uberbot is here and its conversation is not
+law plane_home_button:
+  {PLN.Plane.home.button(PLN.Plane.home(U.Ui.far.st(U.Ui.init(2000n), UBS.Ub.demo.away()))) == True{} : Bool}
+
+# and not where this machine holds it, or has no uberbot
+law plane_home_button_held:
+  {Bool.or(PLN.Plane.home.button(PLN.Plane.home(U.Ui.far.st(U.Ui.init(2000n), UBS.Ub.demo.a()))), PLN.Plane.home.button(PLN.Plane.home(U.Ui.far.st(U.Ui.init(2000n), M.State.empty())))) == False{} : Bool}
+
+# the phones' list plane has the rows of the plane that need the person or run, in the same order
+law plane_list_same:
+  {PLN.Plane.list.same(PLN.Plane.demo(), 200000n) == True{} : Bool}
+
+law plane_list_same_rich:
+  {PLN.Plane.list.same(PLN.Plane.demo.rich(), 200000n) == True{} : Bool}
+
+# Launched threads report back (hub.bend's Launch.tell, Lr.*)
+# ----------------------------------------------------------
+
+# a launched thread's turn end reaches its launcher once
+law launch_reports_turn_end:
+  {H.Lr.demo.tell(H.Lr.demo(True{}), H.Lr.demo.end()) == 1n : Nat}
+
+# an ask it opens reaches the launcher at once, before any turn end
+law launch_ask_at_once:
+  {H.Lr.demo.tell(H.Lr.demo(True{}), [M.AskOpened{"q1", "t1", "question", "AskUserQuestion", "which board?", "", 9n}]) == 1n : Nat}
+
+# a failure too
+law launch_fail_told:
+  {H.Lr.demo.tell(H.Lr.demo(True{}), [M.TurnChanged{"t1", M.Failed{}, 9n}]) == 1n : Nat}
+
+# a step that ends no turn and opens no ask tells nothing (one report per end)
+law launch_once_per_end:
+  {H.Lr.demo.tell(H.Lr.demo(True{}), [M.MessagePosted{"t1", "a2", M.Assistant{}, "more", 9n}]) == 0n : Nat}
+
+# reports turned off: the step is left as it was
+law launch_muted_quiet:
+  {H.Launch.tell(H.Lr.demo(False{}), 9n, "t1", H.Step{H.Lr.demo.end(), []}) == H.Step{H.Lr.demo.end(), []} : H.Step}
+
+# a turn that left work out of hand reports nothing yet (the one that
+# finishes the work does)
+law launch_waits_for_work:
+  {H.Lr.demo.tell(H.Lr.demo.k(True{}, False{}, False{}, [M.WorkSet{"t1", "bg", "a\tx", 2n}]), H.Lr.demo.end()) == 0n : Nat}
+
+# a thread that already wrote to its launcher this turn is not echoed
+law launch_said_quiet:
+  {H.Lr.demo.tell(H.Lr.demo.k(True{}, False{}, False{}, [M.MessagePosted{"t0", M.Link.id("t1", "m5"), M.User{}, "here it is", 2n}]), H.Lr.demo.end()) == 0n : Nat}
+
+# a launcher stopping its own thread is not told it stopped it
+law launch_own_stop_quiet:
+  {H.Lr.count(H.Queue.changes(H.Retire.stop.f(H.Lr.demo(True{}), 9n, "t1", "t0", [])), "t0") == 0n : Nat}
+
+# the person stopping it is told
+law launch_stop_told:
+  {H.Lr.count(H.Queue.changes(H.Retire.stop(H.Lr.demo(True{}), 9n, "t1", [])), "t0") == 1n : Nat}
+
+# reports to a busy launcher wait in its queue, one per end, in order (the
+# queue is in the log, so a restart keeps them)
+law launch_queued_in_order:
+  {H.Lr.demo.twice() == 2n : Nat}
+
+# back and forth with the launcher Lr.loops() times without the person:
+# the reports stop
+law launch_loop_bounded:
+  {H.Lr.demo.loop.on() == False{} : Bool}
+
+# a report from another machine posts once however often it is sent
+law launch_far_once:
+  {FMC.Fm.report.twice() == 1n : Nat}
+
+# the outbox keeps its order, and a line taken leaves it alone
+law launch_far_order:
+  {String.join(H.Lr.far.keep(["a\t1", "b\t2", "c\t3"], "b"), "|") == "a\t1|c\t3" : String}
+
+# a launcher lists each thread once
+law launch_list_once:
+  {M.Launch.add(M.Launch.add("a", "b"), "b") == "a\nb" : String}
+
+# a launched thread links back to its launcher
+law launched_up_launcher:
+  {U.Tasks.up(H.Lr.demo(True{}), "t1") == "t0" : String}
+
+# and its launcher lists it while it runs
+law subs_launched_live_kept:
+  {List.length(&2, SB.SubRow, SB.Subs.launched(H.Lr.demo(True{}), "t0")) == 1n : Nat}
+
+# a bot turn woken by a report is the launched thread's news, already
+# alerted: it is chatter
+law notice_report_quiet:
+  {NO.Turn.msg(NO.Turn{False{}, "[Backplane] Launched thread \"work\" (t1) completed.", 0n}) == True{} : Bool}
+
+# a thread a bot launched may thread_send the bot's thread, which is in no
+# project (and the bot may send to it)
+law launch_send_launcher:
+  {H.Lr.may(M.State.replay([M.ThreadLaunched{"t1", "tb", True{}, 1n}], M.State.empty()), "t1", "tb") == True{} : Bool}
+# Google Antigravity (core/agy.bend)
+# ----------------------------------
+
+law interrupt_antigravity_stops:
+  for +th: String
+  for r: String
+  {H.Stop.outs("antigravity", th, r) == [H.AgentStop{th}] : List<&2, H.Out>}
+
+# an Antigravity thread's turn is one run of Google's agent (over ACP)
+law antigravity_run_turn:
+  for +th: String
+  for +cwd: String
+  for +m: String
+  for +s: String
+  for +r: M.RuntimeMode
+  for i: M.InteractionMode
+  for +t: String
+  for u: String
+  {H.Hub.run.k(4n, th, cwd, "antigravity", m, s, r, i, t, u) == [H.AgyTurn{th, cwd, m, s, r, t}] : List<&2, H.Out>}
+
+# its permission modes: supervised asks, full access allows everything
+law agy_mode_supervised_asks:
+  {AGY.Agy.mode.k(0n) == "default" : String}
+
+law agy_mode_full_allows:
+  {AGY.Agy.mode.k(3n) == "yolo" : String}
+
+# an API key is the default sign-in, and a Google account carries Google's warning
+law agy_default_api_key:
+  {AGY.Agy.method("") == "gemini-api-key" : String}
+
+law agy_google_warns:
+  {AGY.Agy.note.k(3n) == AGY.Agy.warn() : String}
+
+# no address is ever fetched for a sign-in that did not ask
+law agy_callback_needs_signin:
+  for b: String
+  {AGY.Agy.callback.ok("", b) == False{} : Bool}
+
+# ios-snappy: nav
+# The bot row's nav, qualified by its hub, is the same qualified thread
+# sel the opened screen carries. This example has an arbitrary t-prefixed
+# thread id; the general law below covers all untagged nonempty threads.
+# Room and reported bot keys stay local.
+law mnav_bot_sel:
+  for +hub: String
+  for +id: String
+  for +tail: String
+  {Hb.Hubs.nav.bot(hub, BU.BRow{id, "", "t" ++ tail, 0n, "idle", "", False{}, False{}, "", ""}) == Hb.Hubs.id(hub, "t" ++ tail) : String}
+
+law mnav_room_local:
+  for +hub: String
+  for +id: String
+  {Hb.Hubs.nav.qual(hub, "@room:" ++ id) == "@room:" ++ id : String}
+
+law mnav_remote_local:
+  for +hub: String
+  for +id: String
+  {Hb.Hubs.nav.qual(hub, "@remote:" ++ id) == "@remote:" ++ id : String}
+
+# Every valid bot thread qualifies exactly like the opened screen's sel.
+# The reserved room/remote prefixes name other destination kinds.
+law mnav_bot_thread:
+  for +hub: String
+  for +id: String
+  for +thread: String
+  for some: {String.is_empty(thread) == False{} : Bool}
+  for own: {Hb.Hubs.nav.tag(thread) == False{} : Bool}
+  {Hb.Hubs.nav.bot(hub, BU.BRow{id, "", thread, 0n, "idle", "", False{}, False{}, "", ""}) == Hb.Hubs.id(hub, thread) : String}
+# ---- notif-policy ----
+
+# a bot turn woken by a room message that posts, a routine's turn, a
+# launched thread's end that reports to its launcher, a delegated task's
+# note, an intermediate end with background work out and a stop write no
+# record that alerts
+law policy_no_alert_unless:
+  {NO.Policy.demo.quiet() == 0n : Nat}
+
+# the person's message, a completed ready turn: one done; the turn a report wakes afterwards alerts nothing
+law policy_settle_once:
+  {NO.Policy.demo.once() == "done -" : String}
+
+# a turn that ends while a reporting launched thread still works alerts nothing; the turn its report wakes alerts once
+law policy_settle_after_launch:
+  {NO.Policy.demo.launch() == "- done" : String}
+
+# a failure after the person's message alerts; a failed routine turn after it settled does not
+law policy_fail_person_only:
+  {NO.Policy.demo.fail.p() == "fail -" : String}
+
+# an ask opened for the person records an ask (needs on), or no kind (needs off)
+law policy_ask_alerts:
+  {NO.Policy.demo.ask.k(NO.Policy.demo.s(NO.Policy.demo.ask())) == "ask _" : String}
+
+# and the step tells the server once; with needs off it tells no one
+law policy_ask_alerted_out:
+  {H.Alerts.demo.asks(False{}) == 1n : Nat}
+
+law policy_ask_off_silent:
+  {H.Alerts.demo.asks(True{}) == 0n : Nat}
+
+# a merge found records merged and tells the server
+law policy_merge_alerts:
+  {H.Alerts.demo.merge() == "merged 1" : String}
+
+# a turn end that settles records done and tells the server
+law policy_end_alerted:
+  {H.Alerts.demo.end() == "done 1" : String}
+
+# with settled off the completed case records no kind but moves the memory; on again, the old episode does not alert
+law policy_setting_off:
+  {NO.Policy.demo.off() == "_ m1 -" : String}
+
+# with notify.all on the older rule alerts a room exchange's turn again
+law policy_all_legacy:
+  {NO.Policy.demo.all() == "done room-r1" : String}
+
+# a message with a link id or a routine's text is not the person's message
+law policy_link_not_person:
+  {NO.Policy.demo.link() == False{} : Bool}
+
+# the person's own text, or typed from another machine, is
+law policy_person_direct:
+  {Bool.and(NO.Policy.direct("m1", "do it"), NO.Policy.direct("m2", "[message from person@desk]\nhi")) == True{} : Bool}
+
+# notify_person refuses an unknown reason and a reminder outside a routine
+law notify_refuses_chatter:
+  {BHS.Notify.demo.chatter() == "refused refused refused" : String}
+
+# a reminder or digest goes through only in a routine's turn
+law notify_reminder_routine_only:
+  {BHS.Notify.demo.routine() == "note note refused" : String}
+
+# needs_you alerts once in a turn
+law notify_needs_you_once:
+  {BHS.Notify.demo.once() == "note refused" : String}
+
+# done tells the person once and the turn's end then alerts nothing
+law notify_done_settles:
+  {BHS.Notify.demo.done() == "note refused -" : String}
+
+# with the setting off the call succeeds and records no kind
+law notify_setting_off:
+  {BHS.Notify.demo.off() == "_" : String}
+
+# a redraw or a resize is not the person using the window: an open,
+# focused window stops holding phone alerts once they stop using it
+law desk_redraw_not_input:
+  {N.Nui.input([W.WExpose{}, W.WSize{800, 600}, W.WDragLeave{}]) == False{} : Bool}
+
+law desk_key_input:
+  for c: U32
+  for t: U32
+  for m: U32
+  for d: Bool
+  for k: U32
+  for rest: List<&2, W.WinEv>
+  {N.Nui.input(W.WKey{c, t, m, d, k} <> rest) == True{} : Bool}
+
+# a phone alerts when a thread's record changed and has a kind
+law policy_phone_raises:
+  {List.length(&2, J.Json, Nt.Note.ralerts(U.Ui.threads(Nt.Note.demo.s(Nt.Note.demo.rec("done"))), [Nt.RSeen{"t1", ""}], Nt.Note.demo.s(Nt.Note.demo.rec("done")), "")) == 1n : Nat}
+
+# the same record again alerts no one
+law policy_phone_same_none:
+  {List.length(&2, J.Json, Nt.Note.ralerts(U.Ui.threads(Nt.Note.demo.s(Nt.Note.demo.rec("done"))), [Nt.RSeen{"t1", Nt.Note.demo.rec("done")}], Nt.Note.demo.s(Nt.Note.demo.rec("done")), "")) == 0n : Nat}
+
+# a record with no kind alerts no one
+law policy_phone_empty_none:
+  {List.length(&2, J.Json, Nt.Note.ralerts(U.Ui.threads(Nt.Note.demo.s(Nt.Note.demo.rec(""))), [Nt.RSeen{"t1", ""}], Nt.Note.demo.s(Nt.Note.demo.rec("")), "")) == 0n : Nat}
+
+# a thread the frame did not touch alerts no one
+law policy_phone_unseen_none:
+  {List.length(&2, J.Json, Nt.Note.ralerts(U.Ui.threads(Nt.Note.demo.s(Nt.Note.demo.rec("done"))), [], Nt.Note.demo.s(Nt.Note.demo.rec("done")), "")) == 0n : Nat}
+
+# a desk watching the thread holds a done
+law policy_phone_watched_held:
+  {List.length(&2, J.Json, Nt.Note.ralerts(U.Ui.threads(Nt.Note.demo.s(Nt.Note.demo.rec("done"))), [Nt.RSeen{"t1", ""}], Nt.Note.demo.s(Nt.Note.demo.rec("done")), "t1")) == 0n : Nat}
+
+# but not a note
+law policy_phone_note_not_held:
+  {List.length(&2, J.Json, Nt.Note.ralerts(U.Ui.threads(Nt.Note.demo.s(Nt.Note.demo.rec("note"))), [Nt.RSeen{"t1", ""}], Nt.Note.demo.s(Nt.Note.demo.rec("note")), "t1")) == 1n : Nat}
+
+# a frame that carries only a record names its thread
+law policy_phone_ids_record:
+  {Hb.One.pol.ids([J.Json.obj([J.KV{"key", J.Str{"alert.t1"}}, J.KV{"value", J.Str{"x"}}])], []) == ["t1"] : List<&2, String>}
+
+# through a hub's frame: the record raises one alert
+law policy_phone_frame_raises:
+  {List.length(&2, J.Json, Hb.Did.alerts(Hb.One.pol(U.Ui.recv(U.Ui.init(0n), U.Boot.demo("log", False{}, False{}, [C.Change.encode(M.ThreadCreated{"t1", "p1", "hi", M.Local{}, "", "", "claude", "", 1n}), C.Change.encode(M.TurnChanged{"t1", M.Running{}, 2n})])),
+      U.Seq.demo("changes", [C.Change.encode(M.TurnChanged{"t1", M.Completed{}, 3n}), C.Change.encode(M.SettingSet{"alert.t1", Nt.Note.demo.rec("done"), 3n})])))) == 1n : Nat}
+
+# and a turn's end alone raises none
+law policy_phone_turn_end_quiet:
+  {Hb.Did.alerts(Hb.One.pol(U.Ui.recv(U.Ui.init(0n), U.Boot.demo("log", False{}, False{}, [C.Change.encode(M.ThreadCreated{"t1", "p1", "hi", M.Local{}, "", "", "claude", "", 1n}), C.Change.encode(M.TurnChanged{"t1", M.Running{}, 2n})])),
+      U.Seq.demo("changes", [C.Change.encode(M.TurnChanged{"t1", M.Completed{}, 3n})]))) == [] : List<&2, J.Json>}
+
+# a log still arriving is history: no alert
+law policy_phone_boot_quiet:
+  {Hb.Did.alerts(Hb.One.pol(U.Ui.recv(U.Ui.init(0n), U.Boot.demo("log", True{}, True{}, [C.Change.encode(M.ThreadCreated{"t1", "p1", "hi", M.Local{}, "", "", "claude", "", 1n})])),
+      U.Boot.demo("changes", False{}, True{}, [C.Change.encode(M.SettingSet{"alert.t1", Nt.Note.demo.rec("done"), 3n})]))) == [] : List<&2, J.Json>}
+
+# a reminder that came due records a reminder (the setting on, the
+# default), or no kind (off)
+law policy_reminder_alerts:
+  {NO.Policy.demo.reminder() == "reminder _" : String}
+
+# The notification Settings show the policy defaults even before any setting is saved.
+law notify_rows_defaults:
+  {U.Notify.rows(M.State.empty()) == [
+    U.NotifyRow{"Needs me", "Approvals, questions and anything an agent is blocked on until you act.", "on", "notify.needs"},
+    U.NotifyRow{"Settled", "Work you gave a thread is finished, failed, or its branch merged. Once per piece of work.", "on", "notify.settled"},
+    U.NotifyRow{"Reminders", "Reminders and digests you scheduled.", "on", "notify.reminders"},
+    U.NotifyRow{"Everything", "Also every turn end and room exchange, as before.", "off", "notify.all"}] : List<&2, U.NotifyRow>}
+# The compact island counts roots but names only the latest direct send.
+# The earlier island laws retain their legacy helpers (including waiting
+# on work and listing three); production hub/phone content uses compact.
+law island_compact_one_line:
+  {List.length(&2, J.Json, J.Json.elems(J.Json.get_obj(NO.Island.compact.demo.json(NO.Island.compact.demo.five()), "lines"))) == 1n : Nat}
+
+law island_no_children:
+  {NO.Island.compact.count(NO.Island.compact.demo.of(NO.Island.compact.demo.children())) == 0n : Nat}
+
+law island_line_last_sent:
+  {NO.Island.compact.id(NO.Island.compact.demo.of(NO.Island.compact.demo.last())) == "t2" : String}
+
+# ---- end notif-policy ----
+# harness-coord: CLI path
+# the merged PATH begins with the hub's own, unchanged
+law clipath_keeps_current:
+  {CPA.CliPath.merge("/usr/bin:/bin", "/home/h/.nvm/versions/node/v24.13.1/bin:/bin", ["/usr/local/bin"]) == "/usr/bin:/bin:/home/h/.nvm/versions/node/v24.13.1/bin:/usr/local/bin" : String}
+
+# entries the login PATH and the extras repeat appear once
+law clipath_no_dupes:
+  {CPA.CliPath.merge("/a", "/b:/a:/b", ["/c", "/b", "/c"]) == "/a:/b:/c" : String}
+
+# merging again changes nothing
+law clipath_idempotent:
+  {CPA.CliPath.merge(CPA.CliPath.merge("/usr/bin", "/l:/usr/bin", ["/x"]), "/l:/usr/bin", ["/x"]) == CPA.CliPath.merge("/usr/bin", "/l:/usr/bin", ["/x"]) : String}
+
+# nvm's newest node comes first, by version and not by text
+law clipath_nvm_newest_first:
+  {CPA.CliPath.candidates("/h", ["/h/.nvm/versions/node/v9.11.2/bin", "/h/.nvm/versions/node/v24.13.1/bin", "/h/.nvm/versions/node/v18.0.0/bin"]) == ["/h/.nvm/versions/node/v24.13.1/bin", "/h/.nvm/versions/node/v18.0.0/bin", "/h/.nvm/versions/node/v9.11.2/bin"] : List<&2, String>}
+
+# harness-coord: wakes
+law wake_once_per_event:
+  {H.Wake.demo.twice() == 0n : Nat}
+
+law wake_once_drops:
+  {H.Wake.demo.dropped() == 0n : Nat}
+
+law wake_two_events_one_message:
+  {H.Wake.demo.count(H.Wake.demo(False{}, ["end", "done"])) == 1n : Nat}
+
+law wake_not_self:
+  {WAK.Wake.error("tb", "thread", "tb", ["end"]) == "a subscriber cannot wake itself" : String}
+
+law wake_bot_thread_delivered:
+  {H.Wake.demo.count(H.Wake.demo(True{}, ["end"])) == 1n : Nat}
+
+law wake_pr_merged:
+  {H.Lr.count(H.Queue.changes(H.Wake.pr(H.Wake.demo.pr(), 9n, "owner/repo#7", H.Wake.demo.merged())), "tb") == 1n : Nat}
+
+law wake_pr_repeat_quiet:
+  {H.Wake.demo.pr.twice() == 0n : Nat}
+
+law codec_wake_roundtrip:
+  {C.Change.decode(C.Change.encode(M.WakeSet{"w1", "tb", "thread", "t1", ["end", "done"], True{}, "note", 4n})) == Some{M.WakeSet{"w1", "tb", "thread", "t1", ["end", "done"], True{}, "note", 4n}} : Maybe<&2, M.Change>}
+
+law codec_wake_dropped_roundtrip:
+  {C.Change.decode(C.Change.encode(M.WakeDropped{"w1", 9n})) == Some{M.WakeDropped{"w1", 9n}} : Maybe<&2, M.Change>}
+
+law wake_message_one_paragraph:
+  {WAK.Wake.flat("one\ntwo\r\tthree", "") == "one two  three" : String}
+
+law wake_event_independent_of_step:
+  {H.Wake.demo.partial() == 0n : Nat}
+# ---- told-rules-board ----
+# "Already told" history (told.bend), standing rules (rules.bend) and the
+# task board (tboard.bend); all three are settings (model.bend).
+
+# an empty value removes a ledger key, so dropped records leave nothing behind
+law told_setting_empty_removes:
+  {List.length(&2, String, M.Setting.keys(M.State.replay([M.SettingSet{"told.x", "v", 1n}, M.SettingSet{"told.x", "", 2n}], M.State.empty()))) == 0n : Nat}
+
+# a mark stores its key normalized
+law told_mark_key_norm:
+  {TLD.Told.key(TLD.Told.demo.first(TLD.Told.demo.marked())) == "lunch:-kane-" : String}
+
+# a mark is found by its key
+law told_check_finds_marked:
+  {List.length(&2, TLD.Told, TLD.Told.check.d(10n, TLD.Told.demo.marked(), 1010n, "Lunch: Kane!!", "", 0n)) == 1n : Nat}
+
+# and by the words of the same thing said differently
+law told_check_text_overlap:
+  {List.length(&2, TLD.Told, TLD.Told.check.d(10n, TLD.Told.demo.marked(), 1010n, "", "lunch with Kane in ATL on 10/28", 0n)) == 1n : Nat}
+
+# a record 31 days old is pruned, one 29 days old is kept
+law told_prune_old:
+  {Nat.add(Nat.mul(List.length(&2, M.Change, TLD.Told.prune.at(30n, 2000n, TLD.Told.demo.marked(), 1032n)), 10n), List.length(&2, M.Change, TLD.Told.prune.at(30n, 2000n, TLD.Told.demo.marked(), 1029n))) == 10n : Nat}
+
+# a bot woken by a room message that posted nothing tells the person nothing, so nothing is marked
+law told_quiet_end_marks_nothing:
+  {List.length(&2, M.Change, TLD.Told.alert(TLD.Told.demo.chatter(), 2000n, "tb", "completed")) == 0n : Nat}
+
+# with no rule, no block
+law rules_block_empty_when_none:
+  {RLS.Rules.block(RLS.Rules.demo.base(), "t-miso") == "" : String}
+
+# a rule for a bot is in that bot's thread only, a project's in that project's threads only
+law rules_block_scoped:
+  {Bool.and(Bool.and(String.contains(RLS.Rules.block(RLS.Rules.demo.scoped(), "t-miso"), "Miso only"), String.contains(RLS.Rules.block(RLS.Rules.demo.scoped(), "t-pb"), "Power only")),
+    Bool.not(Bool.or(Bool.or(String.contains(RLS.Rules.block(RLS.Rules.demo.scoped(), "t-tofu"), "Miso only"), String.contains(RLS.Rules.block(RLS.Rules.demo.scoped(), "t-other"), "Power only")),
+      Bool.or(String.contains(RLS.Rules.block(RLS.Rules.demo.scoped(), "t-miso"), "Power only"), String.contains(RLS.Rules.block(RLS.Rules.demo.scoped(), "t-pb"), "Miso only"))))) == True{} : Bool}
+
+# an enforced rule refuses the call
+law rules_refuse_enforced:
+  {String.contains(RLS.Rules.gate(RLS.Rules.demo.enforced(), "t-miso", RLS.Rules.demo.call("bot_send")), "Refused by a standing rule") == True{} : Bool}
+
+# the person's word in their latest message unlocks it; a delivered message never does
+law rules_word_unlocks:
+  {Bool.and(String.is_empty(RLS.Rules.gate(RLS.Rules.demo.say(RLS.Rules.demo.enforced(), "t-miso", "sudo buy it"), "t-miso", RLS.Rules.demo.call("bot_send"))),
+    Bool.not(String.is_empty(RLS.Rules.gate(RLS.Rules.demo.say(RLS.Rules.demo.enforced(), "t-miso", "[message from tofu] sudo"), "t-miso", RLS.Rules.demo.call("bot_send"))))) == True{} : Bool}
+
+# a rule on preview_click matches the MCP name
+law rules_mcp_prefix:
+  {RLS.Rules.tool.match("preview_click", "mcp__backplane__preview_click") == True{} : Bool}
+
+# a rule that is off is neither in the block nor enforced
+law rules_off_ignored:
+  {Bool.and(String.is_empty(RLS.Rules.block(RLS.Rules.demo.off(), "t-miso")), String.is_empty(RLS.Rules.gate(RLS.Rules.demo.off(), "t-miso", RLS.Rules.demo.call("bot_send")))) == True{} : Bool}
+
+# open items sort before done ones
+law tb_order_open_first:
+  {TBD.Tb.id(Maybe.default(&2, TBD.TbItem, List.head(&2, TBD.TbItem, TBD.Tb.order([TBD.TbItem{"done", "a", "done", "", "", "", "", Nil{}, "", 1n, 1n, ""}, TBD.TbItem{"todo", "b", "todo", "", "", "", "", Nil{}, "", 2n, 2n, ""}])), TBD.Tb.blank("?", 0n))) == "todo" : String}
+
+# checkbox items become items, headings groups, other lines are skipped
+law tb_import_checkbox:
+  {String.join([TBD.Tb.demo.summary(TBD.Tb.import(M.State.empty(), 1000n, "person", "## Errands\n- [ ] Peach Pass\n- [x] floss\n- plain", "", "")),
+    TBD.Tb.demo.lines(TBD.Tb.demo.import("## Errands\n- [ ] Peach Pass\n- [x] floss\n- plain", M.State.empty()))], " | ") == "2 0 - plain | todo Errands Peach Pass;done Errands floss" : String}
+
+# the same list imported twice adds nothing the second time
+law tb_import_idempotent:
+  {TBD.Tb.demo.summary(TBD.Tb.import(TBD.Tb.demo.import("## Errands\n- [ ] Peach Pass\n- [x] floss", M.State.empty()), 2000n, "person", "## Errands\n- [ ] Peach Pass\n- [x] floss", "", "")) == "0 2 " : String}
+
+# an update that gives only the status keeps the rest
+law tb_update_merges:
+  {TBD.Tb.demo.merged(TBD.Tb.demo.updated()) == "Fix it|a note|doing" : String}
+
+# a due date is YYYY-MM-DD
+law tb_due_shape:
+  {Bool.and(TBD.Tb.date("2026-10-28"), Bool.not(TBD.Tb.date("10/28"))) == True{} : Bool}
+# a report from a launched thread to a bot is bot-to-bot: nothing is told
+law told_report_quiet:
+  {List.length(&2, M.Change, TLD.Told.alert(TLD.Told.demo.report(), 2000n, "tb", "completed")) == 0n : Nat}
+
+# a launch report never unlocks a rule, even when it says the word
+law rules_report_never_unlocks:
+  {String.is_empty(RLS.Rules.gate(RLS.Rules.demo.say.id(RLS.Rules.demo.enforced(), "t-miso", "t:t-pb:m3", "[Backplane] Launched thread \"x\" (t-pb) completed: sudo"), "t-miso", RLS.Rules.demo.call("bot_send"))) == False{} : Bool}
+
+# nor does a message another agent sent (thread_send: a link id), whatever it says
+law rules_link_never_unlocks:
+  {String.is_empty(RLS.Rules.gate(RLS.Rules.demo.say.id(RLS.Rules.demo.enforced(), "t-miso", "t:t-pb:m4", "sudo buy it"), "t-miso", RLS.Rules.demo.call("bot_send"))) == False{} : Bool}
+# a notify_person note is an alert record, so it is marked as told, under its key
+law told_note_marked:
+  {TLD.Told.key(TLD.Told.demo.first(M.State.replay(TLD.Told.alerts([M.SettingSet{"alert.tb", NO.Alert.line("note", "note-n1", "", "5.1", "Order sweatpants"), 5n}], TLD.Told.demo.chatter(), 0n), TLD.Told.demo.chatter()))) == "note-n1" : String}
+
+# a quiet record (no kind) marks nothing
+law told_quiet_record_nothing:
+  {List.length(&2, M.Change, TLD.Told.alerts([M.SettingSet{"alert.tb", NO.Alert.line("", "", "m1", "5.1", ""), 5n}], TLD.Told.demo.chatter(), 0n)) == 0n : Nat}
+# ---- end told-rules-board ----
+# harness-coord: deploy (hub.bend's Deploy.*, core/deploy.bend)
+# ------------------------------------------------------------
+
+# a deploy waits while a thread is inside a tool call
+law deploy_waits_for_tool:
+  {H.Deploy.demo.go(H.Deploy.check(H.Deploy.demo(True{}, H.Deploy.demo.line("t0")), 9n, True{}, H.Deploy.demo.open(True{}))) == 0n : Nat}
+
+# and while a build lock is held
+law deploy_waits_for_lock:
+  {H.Deploy.demo.go(H.Deploy.check(H.Deploy.demo(False{}, H.Deploy.demo.line("t0")), 9n, False{}, Nil{})) == 0n : Nat}
+
+# with no tool call and the locks free it goes, once
+law deploy_goes_when_clear:
+  {H.Deploy.demo.go(H.Deploy.check(H.Deploy.demo(False{}, H.Deploy.demo.line("t0")), 9n, True{}, Nil{})) == 1n : Nat}
+
+# the go clears the wait and writes deploy.done, each once
+law deploy_go_clears_wait:
+  {H.Deploy.demo.sets(H.Deploy.demo.cs(H.Deploy.check(H.Deploy.demo(False{}, H.Deploy.demo.line("t0")), 9n, True{}, Nil{})), "deploy.wait", True{}) == 1n : Nat}
+
+law deploy_go_writes_done:
+  {H.Deploy.demo.sets(H.Deploy.demo.cs(H.Deploy.check(H.Deploy.demo(False{}, H.Deploy.demo.line("t0")), 9n, True{}, Nil{})), "deploy.done", False{}) == 1n : Nat}
+
+# nothing waits: nothing goes
+law deploy_idle_nothing:
+  {H.Deploy.demo.go(H.Deploy.check(H.Deploy.demo(False{}, ""), 9n, True{}, Nil{})) == 0n : Nat}
+
+# the start after a deploy tells the requester once and clears deploy.done
+law deploy_after_note_once:
+  {H.Deploy.demo.notes(H.Deploy.after(H.Deploy.demo.done("t0"), 9n)) == 1n : Nat}
+
+law deploy_after_clears:
+  {H.Deploy.demo.sets(H.Deploy.demo.cs(H.Deploy.after(H.Deploy.demo.done("t0"), 9n)), "deploy.done", True{}) == 1n : Nat}
+
+# a second start says nothing
+law deploy_after_second_start_quiet:
+  {H.Deploy.demo.notes(H.Deploy.after(H.Deploy.demo.again(H.Deploy.demo.done("t0"), H.Deploy.after(H.Deploy.demo.done("t0"), 9n)), 9n)) == 0n : Nat}
+
+# a bot's thread that asked is woken too
+law deploy_requester_bot_thread:
+  {H.Deploy.demo.notes(H.Deploy.after(H.Deploy.demo.bot(), 9n)) == 1n : Nat}
+
+# a thread the restart cut hears of it in its continue message, not in a second note
+law deploy_cut_requester_no_second:
+  {H.Deploy.demo.notes(H.Deploy.after(H.Deploy.demo.done("t1"), 9n)) == 0n : Nat}
+
+# cancel clears the wait
+law deploy_cancel_clears:
+  {DP.Deploy.waiting(H.Deploy.demo.again(H.Deploy.demo(False{}, H.Deploy.demo.line("t0")), H.Deploy.cancel(H.Deploy.demo(False{}, H.Deploy.demo.line("t0")), 9n))) == False{} : Bool}
+
+# ---- phone-sch-viewer: exe path ----
+
+# a replaced binary's path loses the kernel's " (deleted)"; a child of it
+# runs through /proc/self/exe (phone viewers: "No such file or directory")
+law exe_path_plain:
+  {EX.Exe.path("/a/backplane") == "/a/backplane" : String}
+
+law exe_path_deleted:
+  {EX.Exe.path("/a/backplane (deleted)") == "/a/backplane" : String}
+
+law exe_child_plain:
+  {EX.Exe.child("/a/backplane") == "/a/backplane" : String}
+
+law exe_child_deleted:
+  {EX.Exe.child("/a/backplane (deleted)") == "/proc/self/exe" : String}
+
+law exe_gone_plain:
+  {EX.Exe.gone("/a/backplane") == False{} : Bool}
+
+law exe_gone_deleted:
+  {EX.Exe.gone("/a/backplane (deleted)") == True{} : Bool}
+
+# ---- end phone-sch-viewer: exe path ----
+# harness-coord: locks
+# The holder count is structural for every representable lock.
+law lock_exclusive:
+  for l: LCK.NamedLock
+  {Nat.is_le(LCK.Lock.count(l), 1n) == True{} : Bool}
+
+law lock_fifo:
+  for holder: LCK.LockParty
+  for first: LCK.LockParty
+  for rest: List<&2, LCK.LockParty>
+  {LCK.Lock.holder(LCK.Lock.release.k(True{}, LCK.NamedLock{Some{holder}, first <> rest, True{}})) == Some{first} : Maybe<&2, LCK.LockParty>}
+
+law lock_holder_only:
+  for l: LCK.NamedLock
+  {LCK.Lock.release.k(False{}, l) == l : LCK.NamedLock}
+
+law lock_release_next:
+  {H.Lr.count(H.Queue.changes(H.Locks.demo.grant()), "tb") == 1n : Nat}
+
+law lock_deleted_holder_frees:
+  {H.Locks.demo.deleted() == "tb" : String}
+
+law lock_work_releases:
+  {H.Locks.demo.work.end() == "" : String}
+
+law lock_grant_once:
+  {H.Locks.demo.twice() == 0n : Nat}
+
+law lock_ready_idempotent:
+  for l: LCK.NamedLock
+  {LCK.Lock.mark(LCK.Lock.mark(l)) == LCK.Lock.mark(l) : LCK.NamedLock}
+
+law codec_lock_roundtrip:
+  {C.Change.decode(C.Change.encode(M.LockChanged{"bend", LCK.NamedLock{Some{LCK.LockParty{"ta", "thread", "ta", "build", 2n, 0n}}, [LCK.LockParty{"tb", "thread", "tb", "next", 3n, 0n}], True{}}, 4n})) == Some{M.LockChanged{"bend", LCK.NamedLock{Some{LCK.LockParty{"ta", "thread", "ta", "build", 2n, 0n}}, [LCK.LockParty{"tb", "thread", "tb", "next", 3n, 0n}], True{}}, 4n}} : Maybe<&2, M.Change>}
+
+# routines-cal: calendar
+# an update with only a summary patches only the summary
+law cal_patch_only_given:
+  {J.Json.show(GO.Google.event_patch(J.Json.obj([J.KV{"id", J.Str{"ev1"}}, J.KV{"summary", J.Str{"New"}}]))) == "{\"summary\":\"New\"}" : String}
+
+# changing an event asks the person, like creating one
+law cal_update_asks:
+  {GO.Google.asks("calendar_update") == True{} : Bool}
+
+law cal_delete_asks:
+  {GO.Google.asks("calendar_delete") == True{} : Bool}
+
+# an event id with a slash is refused
+law cal_id_no_slash:
+  {GO.Cal.id_ok("a/b") == False{} : Bool}
+
+# routines-cal: one-time routines, zones
+
+# a fixed rule's wall clock is the instant shifted by its offset
+law tz_fixed_wall:
+  for east: Bool
+  for +secs: Nat
+  for +t: Nat
+  {TZ.Tz.wall(TZ.Tz.fixed(east, secs), t) == M.Snooze.local(east, t, secs) : Nat}
+
+# a done routine is never due, whatever else it is
+law sched_done_never:
+  for +s: M.State
+  for +id: String
+  for +bot: String
+  for +name: String
+  for +cron: String
+  for +prompt: String
+  for +on: Bool
+  for +last: Nat
+  for +created: Nat
+  for +deleted: Bool
+  for +once: Nat
+  for +tz: String
+  for +kind: String
+  for +slot: Nat
+  for +now: Nat
+  for +mo: Nat
+  for +me: Bool
+  {SCH.Sched.due(s, BOT.Routine{id, bot, name, cron, prompt, on, last, created, deleted, once, tz, kind, True{}, slot}, now, mo, me) == False{} : Bool}
+
+# a pending one-time routine is due exactly when its time has come
+law sched_once_due:
+  for +s: M.State
+  for +id: String
+  for +bot: String
+  for +name: String
+  for +cron: String
+  for +prompt: String
+  for +last: Nat
+  for +created: Nat
+  for +k: Nat
+  for +tz: String
+  for +kind: String
+  for +slot: Nat
+  for +now: Nat
+  for +mo: Nat
+  for +me: Bool
+  {SCH.Sched.due(s, BOT.Routine{id, bot, name, cron, prompt, True{}, last, created, False{}, 1n+k, tz, kind, False{}, slot}, now, mo, me) == Nat.is_ge(now, 1n+k) : Bool}
+
+# a routine with no plan (the machine's offset, repeating) is due exactly when Bots.due said so
+law sched_legacy_same:
+  for +s: M.State
+  for +id: String
+  for +bot: String
+  for +name: String
+  for +cron: String
+  for +prompt: String
+  for +on: Bool
+  for +last: Nat
+  for +created: Nat
+  for +deleted: Bool
+  for +kind: String
+  for +slot: Nat
+  for +now: Nat
+  for +mo: Nat
+  for +me: Bool
+  {SCH.Sched.due(s, BOT.Routine{id, bot, name, cron, prompt, on, last, created, deleted, 0n, "", kind, False{}, slot}, now, mo, me) == BHS.Bots.due(BOT.Routine{id, bot, name, cron, prompt, on, last, created, deleted, 0n, "", kind, False{}, slot}, now, BHS.Tz{mo, me}) : Bool}
+
+# a zoned routine that fired at wall clock `slot` is not due at any later instant whose wall clock is no later: no slot twice, even when the zone moves west
+law sched_zoned_once_per_slot:
+  for c: CR.Cron
+  for +rule: TZ.TzRule
+  for +last: Nat
+  for +now2: Nat
+  for +slot: Nat
+  {Bool.and(Nat.is_gt(slot, 0n), Bool.and(Nat.is_le(TZ.Tz.wall(rule, now2), slot), SCH.Sched.due.w(c, rule, last, now2, slot))) == False{} : Bool}
+
+# in 20 minutes is 1200 seconds from now
+law when_in_minutes:
+  {WH.When.parse("in 20m", 1000n, TZ.Tz.utc0()) == Some{2200n} : Maybe<&2, Nat>}
+
+law when_in_hours:
+  {WH.When.parse("in 2h", 1000n, TZ.Tz.utc0()) == Some{8200n} : Maybe<&2, Nat>}
+# Browser task skills (src/core/task.bend, docs/teach.md)
+
+# a recorded step in a secret field keeps only the field's label, whatever value came with it
+law task_secret_never_stored:
+  for +v: String
+  for +label: String
+  {TSK.TkStep.value_of(True{}, v, label) == TSK.VSecret{label} : TSK.TkValue}
+
+# a risky step is not continued past, only confirmed
+law task_risky_needs_confirm:
+  for +n: Nat
+  for +kind: String
+  {TSK.Run.step(TSK.Waiting{n, kind, True{}}, TSK.Answer{"continue"}) == TSK.Waiting{n, kind, True{}} : TSK.TkRun}
+
+law run_confirm_runs:
+  for +n: Nat
+  for +k: String
+  for +r: Bool
+  {TSK.Run.step(TSK.Waiting{n, k, r}, TSK.Answer{"confirm"}) == TSK.Running{n} : TSK.TkRun}
+
+# a run that waits asks the person once: nothing after a pause alerts again
+law run_stuck_alerts_once:
+  for +n: Nat
+  for +k: String
+  for +r: Bool
+  for +s: TSK.TkRun
+  {TSK.Run.alerts(TSK.Waiting{n, k, r}, s) == False{} : Bool}
+
+# and a pause from running does
+law run_pause_alerts:
+  for +n: Nat
+  for +k: String
+  for +r: Bool
+  {TSK.Run.alerts(TSK.Running{n}, TSK.Waiting{n, k, r}) == True{} : Bool}
+
+# Stop task ends a pause
+law run_stop_ends:
+  for +n: Nat
+  for +k: String
+  for +r: Bool
+  {TSK.Run.step(TSK.Waiting{n, k, r}, TSK.Answer{"stop"}) == TSK.Ended{"stopped"} : TSK.TkRun}
+
+# while the person drives, the bot's calls do nothing
+law drive_person_locks_bot:
+  for +w: String
+  {TSK.Drive.can_bot(TSK.DPerson{w}) == False{} : Bool}
+
+# a slug is never empty
+law task_slug_nonempty:
+  for +x: String
+  {String.is_empty(TSK.Tk.slug.or(x)) == False{} : Bool}
+
+law task_slug_empty:
+  {TSK.Task.slug("") == "task" : String}
+# gmail: replies, attachments, drafts
+
+# a reply with no subject given answers "Re: <original>"
+law gmail_reply_subject_adds_re:
+  {GO.Gmail.reply_subject("", "Invoice 1042") == "Re: Invoice 1042" : String}
+
+# an original that already starts with Re: (any case) is not prefixed again
+law gmail_reply_subject_keeps_re:
+  {GO.Gmail.reply_subject("", "RE: Invoice 1042") == "RE: Invoice 1042" : String}
+
+# a reply's References are the original's, then its Message-ID
+law gmail_references_appends:
+  {GO.Gmail.references("<a@x> <b@x>", "<c@x>") == "<a@x> <b@x> <c@x>" : String}
+
+# a reply goes to the original's Reply-To, not its From
+law gmail_reply_to_prefers_reply_to:
+  {GO.Gmail.reply_to_addr("r@x.org", "f@x.org") == "r@x.org" : String}
+
+# an attachment's type comes from its extension, in any case
+law gmail_mime_type_pdf:
+  {GO.Gmail.mime_type("Invoice.PDF") == "application/pdf" : String}
+
+# an unknown extension is a binary file
+law gmail_mime_type_default:
+  {GO.Gmail.mime_type("archive.xyz") == "application/octet-stream" : String}
+
+# a plain-text signature follows the body after a blank line
+law gmail_signed_plain:
+  {GO.Gmail.signed(False{}, "hi", "-- me") == "hi\n\n-- me" : String}
+
+# an HTML signature is escaped text after two line breaks
+law gmail_signed_html_escapes:
+  {GO.Gmail.signed(True{}, "<p>hi</p>", "A <b>") == "<p>hi</p><br><br>A &lt;b&gt;" : String}
+
+# no signature, no change
+law gmail_signed_empty_unchanged:
+  {GO.Gmail.signed(True{}, "hi", " ") == "hi" : String}
+
+# saving a draft sends nothing and asks nobody
+law gmail_draft_no_ask:
+  {GO.Google.asks("gmail_draft") == False{} : Bool}
+
+# sizes are shown for a person
+law gmail_size_kb:
+  {GO.Gmail.size(2048n) == "2 KB" : String}
+
+# the approval leaves out a line with nothing to say
+law gmail_review_omits_empty_cc:
+  {GO.Gmail.review("", "a@x.org", "a@x.org", "b@x.org", "", "", "Hi", "", "", False{}, "text") == "Account: a@x.org\nFrom: a@x.org\nTo: b@x.org\nSubject: Hi\n\ntext" : String}
+
+# the approval of a send reads "Send this email?" on every client
+law ask_head_gmail:
+  {U.Ask.head("approval", "gmail_send", "To: a") == "Send this email?" : String}
+
+# and of a draft "Send this draft?"
+law ask_head_draft:
+  {U.Ask.head("approval", "gmail_send", "Draft: r1") == "Send this draft?" : String}
+
+# any other tool keeps "Allow <tool>?"
+law ask_head_other_tool:
+  {U.Ask.head("approval", "Bash", "ls") == "Allow Bash?" : String}
+
+# a calendar change reads as one
+law ask_head_cal_update:
+  {U.Ask.head("approval", "calendar_update", "x") == "Change this event?" : String}
+
+# end gmail: replies, attachments, drafts
+# harness-coord: deploy inflight (hub.bend's Tools.*, core/deploy.bend's Open.*)
+# ---------------------------------------------------------------------------
+
+# a tool_use line opens its call and a tool_result line shuts the same call,
+# each once (nothing else opens or shuts it)
+law tool_open_shut_pair:
+  {H.Tools.demo.pair() == 11n : Nat}
+
+# a turn that ends shuts every call of its thread
+law tool_turn_end_clears:
+  {H.Tools.demo.ends() == 1n : Nat}
+
+# a deploy with no call open goes, though the newest entry of the running thread is a tool call
+law deploy_goes_between_calls:
+  {H.Deploy.demo.go(H.Deploy.check(H.Deploy.demo(True{}, H.Deploy.demo.line("t0")), 9n, True{}, H.Deploy.demo.open(False{}))) == 1n : Nat}
+
+# and it waits while a call is open
+law deploy_waits_open_call:
+  {H.Deploy.demo.go(H.Deploy.check(H.Deploy.demo(False{}, H.Deploy.demo.line("t0")), 9n, True{}, H.Deploy.demo.open(True{}))) == 0n : Nat}
+# ios-snappy: lost work
+# Background work whose owner died is ended, so the phones' island (which
+# counts a thread's rows, M.Work.busy) stops listing it: the agent's exit
+# leaves none of its rows (a delegated child's task and watched work are
+# not the agent's, and stay), a restart leaves none at work, and with
+# restart.continue on none at all: they are put aside (Lost.aside) until
+# the agent is told, once.
+law lostwork_exit_clears:
+  {M.Bg.live(M.Bg.of(H.Lost.exited(H.Lost.demo(True{}, False{}), "t1"), "t1")) == 0n : Nat}
+
+law lostwork_exit_clears_off:
+  {M.Bg.live(M.Bg.of(H.Lost.exited(H.Lost.demo(False{}, False{}), "t1"), "t1")) == 0n : Nat}
+
+law lostwork_exit_clears_running:
+  {M.Bg.live(M.Bg.of(H.Lost.exited(H.Lost.demo(True{}, True{}), "t1"), "t1")) == 0n : Nat}
+
+law lostwork_exit_keeps_child:
+  {M.Work.busy(H.Lost.exited(H.Lost.parent(), "t0"), "t0") == 1n : Nat}
+
+law lostwork_exit_keeps_watch:
+  {M.Work.rows(H.Lost.exited(H.Watch.demo.at(False{}, "t1"), "t1"), "t1") == 1n : Nat}
+
+law lostwork_exit_island_hides:
+  {J.Json.show(J.Json.arr(Nt.Note.lines.w([H.Hub.thread(H.Lost.exited(H.Lost.demo(False{}, False{}), "t1"), "t1")], M.Work.kids.map(H.Lost.exited(H.Lost.demo(False{}, False{}), "t1")), H.Lost.exited(H.Lost.demo(False{}, False{}), "t1")))) == "[]" : String}
+
+law lostwork_recover_none_open:
+  {H.Lost.open(H.Rec.after(H.Lost.many(), 10n)) == 0n : Nat}
+
+law lostwork_recover_none_open_off:
+  {H.Lost.open(H.Rec.after(M.State.replay([M.SettingSet{"restart.continue", "off", 9n}], H.Lost.many()), 10n)) == 0n : Nat}
+
+law lostwork_recover_none_held:
+  {H.Lost.held(H.Rec.after(H.Lost.many(), 10n)) == 0n : Nat}
+
+law lostwork_recover_none_held_carried:
+  {H.Lost.held(H.Carry.after(H.Lost.many(), 10n)) == 0n : Nat}
+
+law lostwork_recover_island_hides:
+  {J.Json.show(J.Json.arr(Nt.Note.lines.w([H.Hub.thread(H.Rec.after(H.Lost.demo(True{}, False{}), 10n), "t1")], M.Work.kids.map(H.Rec.after(H.Lost.demo(True{}, False{}), 10n)), H.Rec.after(H.Lost.demo(True{}, False{}), 10n)))) == "[]" : String}
+
+law lostwork_recover_still_told:
+  {H.Lost.told(M.State.mine(H.Carry.after(H.Lost.demo(True{}, False{}), 10n), "t1")) == 1n : Nat}
+
+law lostwork_recover_nothing_left_aside:
+  {List.length(&2, String, H.Lost.stash(H.Carry.after(H.Lost.demo(True{}, False{}), 10n), "t1")) == 0n : Nat}
+
+law lostwork_recover_old_rows_go:
+  {M.Bg.live(M.Bg.of(H.Rec.after(H.Lost.stale(True{}), 10n), "t1")) == 0n : Nat}
+
+law lostwork_recover_old_rows_go_off:
+  {M.Bg.live(M.Bg.of(H.Rec.after(H.Lost.stale(False{}), 10n), "t1")) == 0n : Nat}

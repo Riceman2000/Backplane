@@ -10,13 +10,20 @@ class AppModel(app: Application) : AndroidViewModel(app) {
 
     val links get() = core.links
     val screen get() = core.screen
+    val opening get() = core.opening
+    val leaving get() = core.leaving
+    val seenThreads get() = core.seenThreads
+    val seenBots get() = core.seenBots
+    val seenPages get() = core.seenPages
+    fun open(nav: String, action: String, value: String, title: String, cat: String = "", kind: String = "thread") = core.open(nav, action, value, title, cat, kind)
+    fun back() = core.back()
+    // the card and the plane to draw: the screen's, else the last it carried
+    fun uber(s: Screen): UberCard? = if (s.plane != null) s.uber else if (s.uber != null) core.lastUber ?: s.uber else null
+    fun plane(s: Screen): PlaneModel? = s.plane ?: if (s.uber != null) core.lastPlane else null
     val composer get() = core.composer
     val scrolls get() = core.scrolls
     val jump get() = core.jump
     val plots get() = core.plots
-    var picking
-        get() = core.picking
-        set(v) { core.picking = v }
 
     fun pair(text: String) = core.pair(text)
     fun unpair(key: String) = core.unpair(key)

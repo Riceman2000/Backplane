@@ -22,11 +22,13 @@
 # on the Mac compiles it.
 set -eu
 cd "$(dirname "$0")/.."
+. scripts/bendok.sh
 mode=${1:-all}
 pre=${BACKPLANE_PREBUILT:-}
-[ "$pre" = 1 ] || for f in src/web/app.bend src/server/main.bend src/app/main.bend; do
-  out=$(bend "$f" --check-only 2>&1) || { echo "$out"; exit 1; }
-  case $out in *"All terms check"*) ;; *) echo "$out"; exit 1 ;; esac
+# CI's "laws" job (scripts/check.sh) has already checked every file, these
+# three roots included: BACKPLANE_SKIP_CHECK=1 does not do it again
+[ "$pre" = 1 ] || [ "${BACKPLANE_SKIP_CHECK:-}" = 1 ] || for f in src/web/app.bend src/server/main.bend src/app/main.bend; do
+  bend_check "$f" || exit 1
 done
 if [ -n "${BACKPLANE_X11:-}" ]; then
   export CPATH="$BACKPLANE_X11/include${CPATH:+:$CPATH}"
@@ -43,6 +45,7 @@ else
   rm -rf dist
   mkdir -p dist
   bend src/web/index.html -o dist/web
+  python3 scripts/js-unmarshal.py ../core/client.Ui dist/web/chunk-*.js
   cp src/web/sw.js dist/web/sw.js
   # precompressed copies: the server sends these to browsers that take gzip
   for f in dist/web/*.js dist/web/*.css dist/web/*.html; do gzip -9 -k -n -f "$f"; done

@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -94,7 +95,7 @@ private val square = RoundedCornerShape(4.dp)
 
 // how a mood looks next to a cat
 @Composable
-private fun moodTint(mood: String): Color = when (mood) {
+internal fun moodTint(mood: String): Color = when (mood) {
     "wait" -> Color(0xFFFF9F0A)
     "work", "talk" -> Color(0xFF30D158)
     "think" -> Color(0xFF0A84FF)
@@ -104,7 +105,7 @@ private fun moodTint(mood: String): Color = when (mood) {
 }
 
 @Composable
-private fun MoodDot(mood: String) {
+internal fun MoodDot(mood: String) {
     Box(Modifier.size(7.dp).clip(CircleShape).background(moodTint(mood)))
 }
 
@@ -152,7 +153,7 @@ fun LazyListScope.botsSection(m: AppModel, s: Screen) {
             },
             leadingContent = { BotCat(m, b.cat, 40.dp) },
             modifier = Modifier.alpha(if (b.mood == "away") 0.5f else 1f)
-                .clickable { m.act(b.act, b.id) },
+                .clickable { m.open(b.nav, b.act, b.id, b.name, b.cat, if (b.remote) "remote" else "bot") },
         )
     }
     items(s.rooms, key = { "r:" + it.id }) { r ->
@@ -160,7 +161,7 @@ fun LazyListScope.botsSection(m: AppModel, s: Screen) {
             headlineContent = { Text(r.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             supportingContent = { Text(listOf("${r.members}", r.machine).filter { it.isNotEmpty() }.joinToString(" · ")) },
             leadingContent = { Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) { Icon(Icons.Filled.Forum, null) } },
-            modifier = Modifier.clickable { m.act("room", r.id) },
+            modifier = Modifier.clickable { m.open(r.nav, "room", r.id, r.name, kind = "room") },
         )
     }
 }
@@ -178,7 +179,7 @@ fun NewBotDialog(m: AppModel, f: NewBot) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(name, { name = it; m.field("name", it) }, Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text("Name") })
+                    label = { Text(f.hint) })
                 OutlinedTextField(persona, { persona = it; m.field("persona", it) }, Modifier.fillMaxWidth(), minLines = 3, maxLines = 8,
                     label = { Text("Persona") })
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -272,13 +273,14 @@ private fun BotScreen(m: AppModel, s: Screen, b: BotView) {
         Column {
             TopAppBar(
                 title = { Text(b.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                navigationIcon = { IconButton(onClick = { m.act("select", "") }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                navigationIcon = { IconButton(onClick = { m.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
             )
             BotTabs(m, b)
         }
     }) { pad ->
         Box(Modifier.fillMaxSize().padding(pad).imePadding()) {
             when (b.tab) {
+                "status" -> StatusTab(m, m.plane(s))
                 "space" -> if (b.page != null) SpacePage(m, b.page) else b.space?.let { SpaceView(it) { a, v -> m.act(a, v) } }
                 "browser" -> BrowserTab(m, b.browser)
                 "memory" -> MemoryTab(m, b.memory)
@@ -367,27 +369,34 @@ private fun RoutinesTab(m: AppModel, b: BotView) {
                 headlineContent = { Text(r.name, fontWeight = FontWeight.SemiBold) },
                 supportingContent = {
                     Column {
-                        Text(r.schedule, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelMedium)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (r.kind == "reminder") Icon(Icons.Filled.Notifications, null, Modifier.size(14.dp))
+                            Tag(r.label)
+                            Text(r.schedule, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelMedium)
+                        }
+                        if (r.done) Text(r.doneText, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                        else if (r.next.isNotEmpty()) Text(
+                            "Next " + r.next + (if (r.rel.isEmpty()) "" else " · " + r.rel) + (if (r.zone == "your time") "" else " · " + r.zone),
+                            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
                         Text(r.prompt, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        if (r.last.isNotEmpty()) Text("last " + r.last, style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline)
                     }
                 },
                 trailingContent = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Switch(r.on, { m.act("routine-toggle", r.id) })
+                        if (!r.done) Switch(r.on, { m.act("routine-toggle", r.id) })
                         Box {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More") }
                             DropdownMenu(menu, { menu = false }) {
-                                DropdownMenuItem(text = { Text("Run now") }, onClick = { menu = false; m.act("routine-run", r.id) })
-                                DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; m.act("routine-edit", r.id) })
+                                if (!r.done) DropdownMenuItem(text = { Text("Run now") }, onClick = { menu = false; m.act("routine-run", r.id) })
+                                if (!r.done) DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; m.act("routine-edit", r.id) })
                                 DropdownMenuItem(text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
                                     onClick = { menu = false; m.act("routine-delete", r.id) })
                             }
                         }
                     }
                 },
-                modifier = Modifier.clickable { m.act("routine-edit", r.id) },
+                // a done routine is faded
+                modifier = Modifier.alpha(if (r.done) 0.55f else 1f).clickable { m.act("routine-edit", r.id) },
             )
             HorizontalDivider()
         }
@@ -408,8 +417,8 @@ private fun RoutineDialog(m: AppModel, f: RoutineForm) {
                 OutlinedTextField(name, { name = it; m.field("oname", it) }, Modifier.fillMaxWidth(), singleLine = true,
                     label = { Text("Name") })
                 OutlinedTextField(cron, { cron = it; m.field("ocron", it) }, Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text("When") }, placeholder = { Text("0 9 * * 1-5") },
-                    supportingText = { Text("Cron, @daily, every 15m, weekdays 08:00") },
+                    label = { Text("When") }, placeholder = { Text("daily 09:30 · tomorrow 9am · in 2h") },
+                    supportingText = { Text(f.hint.ifEmpty { "A schedule (daily 09:30, every 15m, cron) or a time (tomorrow 9am, in 2h)" }) },
                     textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false))
                 OutlinedTextField(prompt, { prompt = it; m.field("oprompt", it) }, Modifier.fillMaxWidth(), minLines = 3, maxLines = 10,
@@ -504,7 +513,17 @@ private fun SettingsTab(m: AppModel, b: BotView, st: BotSettings) {
         st.google.accounts.forEach { a ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(a, Modifier.weight(1f), maxLines = 1)
+                TextButton(onClick = { m.act("google", "sig-edit:$a") }) { Text("Signature") }
                 TextButton(onClick = { m.act("google", "signout:$a") }) { Text("Sign out", color = MaterialTheme.colorScheme.error) }
+            }
+            if (st.google.sigFor == a) {
+                var gsig by remember(a) { mutableStateOf(st.google.sigText) }
+                OutlinedTextField(gsig, { gsig = it; m.field("gsig", it) }, Modifier.fillMaxWidth(), minLines = 2, maxLines = 6,
+                    placeholder = { Text("— Sent by Backplane on behalf of $a") })
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { m.act("google", "sig-save") }, shape = square) { Text("Save") }
+                    TextButton(onClick = { m.act("google", "sig-cancel") }) { Text("Cancel") }
+                }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -581,7 +600,7 @@ private fun TalkScreen(m: AppModel, b: BotView, field: String, send: String) {
                                 color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     },
-                    navigationIcon = { IconButton(onClick = { m.act("select", "") }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                    navigationIcon = { IconButton(onClick = { m.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                     actions = {
                         if (b.kind == "room") Box {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More") }

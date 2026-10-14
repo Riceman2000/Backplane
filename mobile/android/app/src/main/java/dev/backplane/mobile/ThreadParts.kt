@@ -38,8 +38,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -72,6 +76,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Difference
 import androidx.compose.material.icons.filled.FindInPage
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Snooze
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Error
@@ -130,6 +135,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -399,6 +407,13 @@ fun EntryRow(m: AppModel, e: Entry, show: (String) -> Unit) {
         "link" -> Text(e.text, Modifier.clickable { m.act("select", e.value) }.padding(vertical = 2.dp),
             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // a reminder the hub delivered: a bell, Reminder, the text and when
+        "reminder" -> Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Filled.Notifications, "Reminder", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+            Text(e.text, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Text(e.at, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
         // a design step: shows it in the viewer
         "step" -> Row(Modifier.fillMaxWidth().clickable { m.act("hist-show", e.value) }.padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -417,8 +432,8 @@ fun EntryRow(m: AppModel, e: Entry, show: (String) -> Unit) {
 
 private fun subColor(state: String) = when (state) {
     "running" -> PhaseColor.accent
-    "done", "reporting" -> PhaseColor.ok
-    "watching", "launching" -> PhaseColor.accent
+    "done", "reporting", "held" -> PhaseColor.ok
+    "watching", "launching", "waiting on", "waiting" -> PhaseColor.accent
     "queued" -> Color.Gray
     "cancelled", "cancelling" -> PhaseColor.warn
     else -> PhaseColor.bad
@@ -449,7 +464,7 @@ fun SubsView(m: AppModel, subs: Subs) {
                     Text(if (r.agent) (if (r.open) "▾" else "▸") else r.who, style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.outline, maxLines = 1)
                     Text(r.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (r.cancel.isNotEmpty()) Text("Stop", Modifier.clickable { m.act(r.cancel, r.id) }.padding(horizontal = 4.dp),
+                    if (r.cancel.isNotEmpty()) Text(if (r.cancel == "wake-cancel") "Cancel" else "Stop", Modifier.clickable { m.act(r.cancel, r.id) }.padding(horizontal = 4.dp),
                         style = MaterialTheme.typography.labelSmall, color = PhaseColor.warn)
                     Text(r.state, style = MaterialTheme.typography.labelSmall, color = subColor(r.state))
                 }
@@ -477,8 +492,9 @@ fun AskCard(m: AppModel, a: Ask) {
                 Text(a.head, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             }
             if (a.blocks.isNotEmpty()) Box(Modifier.heightIn(max = 220.dp).verticalScroll(rememberScrollState())) { Markdown(a.blocks) }
-            else if (a.detail.isNotEmpty()) Text(a.detail, style = MaterialTheme.typography.labelMedium.copy(fontFamily = mono),
-                maxLines = 8, overflow = TextOverflow.Ellipsis)
+            else if (a.detail.isNotEmpty()) Box(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
+                Text(a.detail, style = MaterialTheme.typography.labelMedium.copy(fontFamily = mono))
+            }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (b in a.buttons) {
                     if (b.primary) Button(onClick = { m.act("answer", b.value) }, shape = corner) { Text(b.label) }
@@ -508,14 +524,40 @@ fun ComposerExtras(m: AppModel, t: ThreadView) {
             }
         }
     }
-    if (t.skills.isNotEmpty()) Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        t.skills.forEachIndexed { i, k ->
-            Surface(onClick = { m.act("skill", k.name) }, shape = corner, modifier = Modifier.fillMaxWidth(),
-                color = if (k.on) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface) {
-                Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                    Text(k.name, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, maxLines = 1)
-                    if (k.desc.isNotEmpty()) Text(k.desc, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (t.skills.isNotEmpty()) Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer) {
+        // Bend marks the highlighted row; the first one is it only when none is marked
+        val hot = t.skills.indexOfFirst { it.on }.coerceAtLeast(0)
+        val list = rememberLazyListState()
+        LaunchedEffect(hot) { list.animateScrollToItem(hot) }
+        // about five rows, fewer when the keyboard leaves little room (landscape)
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val ime = with(density) { WindowInsets.ime.getBottom(density).toDp() }
+        val room = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp - ime
+        val cap = (room * 0.4f).coerceIn(48.dp, 240.dp)
+        Column {
+            HorizontalDivider()
+            Box {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = cap), state = list) {
+                    itemsIndexed(t.skills) { i, k ->
+                        val sel = i == hot
+                        val label = if (k.desc.isEmpty()) k.name else k.name + ", " + k.desc
+                        Surface(onClick = { m.act("skill", k.name) }, shape = corner,
+                            modifier = Modifier.fillMaxWidth().semantics { contentDescription = label; selected = sel },
+                            color = if (sel) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent) {
+                            Column(Modifier.heightIn(min = 48.dp).padding(start = 12.dp, end = 56.dp, top = 6.dp, bottom = 6.dp),
+                                verticalArrangement = Arrangement.Center) {
+                                Text(k.name, style = MaterialTheme.typography.labelLarge, fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    color = if (sel) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface)
+                                if (k.desc.isNotEmpty()) Text(k.desc, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = if (sel) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+                IconButton(onClick = { m.act("skill-close") }, Modifier.align(Alignment.TopEnd).size(48.dp)) {
+                    Icon(Icons.Filled.Close, "Close suggestions", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }

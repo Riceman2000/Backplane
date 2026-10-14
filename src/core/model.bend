@@ -1,5 +1,8 @@
 import Base
 import ./bot.bend as BT
+import ./json.bend as J
+import ./ubop.bend as UO
+import ./locks.bend as LK
 
 # The product's state, event-sourced. Every change is a Change appended to
 # the log; the read model is `replay(log)`. Events are persisted forever:
@@ -246,6 +249,37 @@ type Change is Data:
   # say bg.<thread> that way). Unlike a setting, it goes to the owner's
   # other machines with its thread (far.bend's Fr.shared)
   WorkSet{thread: String, kind: String, rows: String, at: Nat}
+  # the person made `bot` the uberbot (uber.bot), `uid` its id across
+  # machines (uber.uid); bot "" means no uberbot (uber.bot)
+  UberSet{bot: String, uid: String, at: Nat}
+  # one op of the uberbot `uid`'s log, made by machine `origin` as its
+  # n-th, stamped `stamp` (a hybrid logical clock, ubop.bend), `op` its
+  # body as compact JSON; folded into settings under the uid (State.uberop)
+  UberOp{uid: String, origin: String, n: Nat, stamp: String, op: String, at: Nat}
+  # thread `id` was started by `by` (thread_launch: the thread or bot thread
+  # that called it; a caller elsewhere as `<link>~<thread>`); `report`
+  # whether its turn ends, asks and failures go back to `by` (Launch below).
+  # Again later with the same `by`: the report choice changes (thread_update)
+  ThreadLaunched{id: String, by: String, report: Bool, at: Nat}
+  WakeSet{id: String, by: String, kind: String, target: String, events: List<&2, String>, once: Bool, note: String, at: Nat}
+  WakeDropped{id: String, at: Nat}
+  LockChanged{name: String, lock: LK.NamedLock, at: Nat}
+  # routines-cal (core/sched.bend). A routine's plan, logged right after a
+  # RoutineSet: `once` the UTC instant of a one-time fire (0: repeats), `tz`
+  # "" (the machine's offset, as before), "person" or an IANA zone, `kind`
+  # "" (a prompt to the bot) or "remind" (an alert to the person). It
+  # clears done and slot. RoutineSlot: the zone's wall clock at the last
+  # fire of a zoned routine. RoutineDone: a one-time routine fired.
+  # Reminded: a reminder was delivered into `thread` (an Act of tone
+  # "remind"); it wakes no agent.
+  RoutinePlan{id: String, once: Nat, tz: String, kind: String, at: Nat}
+  RoutineSlot{id: String, slot: Nat, at: Nat}
+  RoutineDone{id: String, at: Nat}
+  Reminded{id: String, bot: String, thread: String, text: String, at: Nat}
+  # a bot's browser task skill (task.bend), its JSON as text; TaskDeleted
+  # takes it away. Folded into the bot world like memory
+  TaskSet{bot: String, slug: String, json: String, at: Nat}
+  TaskDeleted{bot: String, slug: String, at: Nat}
 
 # the later of two times. Base's Nat.max recurses once per unit and
 # overflows at epoch scale; Nat.is_ge compiles to a machine comparison.
@@ -817,8 +851,27 @@ def Idx.step(step: Bool, ix: Map<&2, List<&2, Entry>>, +e: Entry) -> Map<&2, Lis
     case False{}:
       ix
 
+# a design review comment op (an Act of tone "review", core/review.bend) is
+# filed under "@review:<thread>" as well
+def Idx.review.key(+th: String) -> String:
+  "@review:" ++ th
+
+def Idx.is_review(e: Entry) -> Bool:
+  match e:
+    case Msg{_, _, _, _, _}:
+      False{}
+    case Act{_, _, +tone, _, _, _}:
+      String.eq(tone, "review")
+
+def Idx.review(rv: Bool, ix: Map<&2, List<&2, Entry>>, +e: Entry) -> Map<&2, List<&2, Entry>>:
+  match rv:
+    case True{}:
+      Idx.put(ix, Idx.review.key(Idx.thread(e)), e)
+    case False{}:
+      ix
+
 def Idx.post(ix: Map<&2, List<&2, Entry>>, +e: Entry) -> Map<&2, List<&2, Entry>>:
-  Idx.step(Idx.is_step(e), Idx.post.k(ix, Idx.thread(e), Link.from(Idx.id(e)), e), e)
+  Idx.review(Idx.is_review(e), Idx.step(Idx.is_step(e), Idx.post.k(ix, Idx.thread(e), Link.from(Idx.id(e)), e), e), e)
 
 # Projection
 # ----------
@@ -922,6 +975,12 @@ def State.steps(s: State, +th: String) -> List<&2, Entry>:
     case State{_, _, _, _, _, _, _, _, _, _, bw}:
       Idx.get(Ext.by(Ext.of(bw)), Idx.steps.key(th))
 
+# a thread's design review ops (Acts of tone "review"), newest first
+def State.reviews(s: State, +th: String) -> List<&2, Entry>:
+  match s:
+    case State{_, _, _, _, _, _, _, _, _, _, bw}:
+      Idx.get(Ext.by(Ext.of(bw)), Idx.review.key(th))
+
 # every message between threads, newest first
 def State.links(s: State) -> List<&2, Entry>:
   match s:
@@ -953,9 +1012,22 @@ def State.put_task(s: State, t: Task) -> State:
   Task{+id, p, c, d, st, su, dl, pr, mo} = t
   State{ps, ts, es, n, Map.set(&2, Task, tk, id, Task{id, p, c, d, st, su, dl, pr, mo}), sg, qu, ak, dv, nv, bw}
 
-def State.setting(s: State, k: String, v: String) -> State:
+# keys of the ledgers (told.*, rule.*, board.*): an empty value removes the
+# key, so dropped records leave nothing in Setting.keys (law
+# told_setting_empty_removes)
+def Setting.ledger(+k: String) -> Bool:
+  Bool.or(Bool.or(String.starts_with(k, "told."), String.starts_with(k, "rule.")), String.starts_with(k, "board."))
+
+def State.setting.put(del: Bool, sg: Map<&2, String>, k: String, v: String) -> Map<&2, String>:
+  match del:
+    case True{}:
+      Map.del(&2, String, sg, k)
+    case False{}:
+      Map.set(&2, String, sg, k, v)
+
+def State.setting(s: State, +k: String, +v: String) -> State:
   State{ps, ts, es, n, tk, sg, qu, ak, dv, nv, bw} = s
-  State{ps, ts, es, n, tk, Map.set(&2, String, sg, k, v), qu, ak, dv, nv, bw}
+  State{ps, ts, es, n, tk, State.setting.put(Bool.and(String.is_empty(v), Setting.ledger(k)), sg, k, v), qu, ak, dv, nv, bw}
 
 def Ask.blank(id: String) -> Ask:
   Ask{id, "", "", "", "", "", False{}, ""}
@@ -1132,6 +1204,18 @@ def Setting.get(s: State, +k: String, d: String) -> String:
     case State{_, _, _, _, _, sg, qu, ak, _, _, _}:
       State.get.k(Map.get(String, d, sg, k))
 
+# the threads with something queued (even handed-over context alone), and the
+# key of every setting (the status plane counts only the threads these can touch)
+def Queue.threads(s: State) -> List<&2, String>:
+  match s:
+    case State{_, _, _, _, _, _, qu, _, _, _, _}:
+      Map.keys(&2, List<&2, QItem>, qu)
+
+def Setting.keys(s: State) -> List<&2, String>:
+  match s:
+    case State{_, _, _, _, _, sg, _, _, _, _, _}:
+      Map.keys(&2, String, sg)
+
 # The "restart.continue" setting: after a restart, a turn the restart cut
 # short goes on by itself (on unless "off"; hub.bend's Carry)
 def Carry.on(+s: State) -> Bool:
@@ -1170,13 +1254,20 @@ def Switch.of(e: Entry) -> String:
     case Act{_, t, _, _, _, _}:
       t
 
-# how many entries a thread has
-def Switch.count(es: List<&2, Entry>, +th: String) -> Nat:
+# how many of these entries are the thread's own, in a tail call: the
+# phones' JavaScript has a small stack, and a walk that added outside the
+# call overflowed it on a real log (one ProviderSet blanked the app)
+def Switch.count.go(es: List<&2, Entry>, +th: String, n: Nat) -> Nat:
   match es:
     case Nil{}:
-      0n
+      n
     case +e <> t:
-      Switch.count.k(String.eq(Switch.of(e), th), Switch.count(t, th))
+      Switch.count.go(t, th, Switch.count.k(String.eq(Switch.of(e), th), n))
+
+# how many entries a thread has: its own among those filed under it (Idx;
+# the messages it sent elsewhere are filed there too), never the whole log
+def Switch.count(s: State, +th: String) -> Nat:
+  Switch.count.go(State.mine(s, th), th, 0n)
 
 def Switch.prov(t: Thread) -> String:
   match t:
@@ -1207,7 +1298,7 @@ def State.thread.get(s: State, +id: String) -> Thread:
       State.thread.get.k(Map.get(Thread, Thread.blank(id), ts, id))
 
 def State.switch.k(+s: State, +th: String, +old: String, +oldse: String, +p: String, m: String) -> State:
-  +s1 = State.setting(State.setting(s, Switch.session.key(th, old), oldse), Switch.seen.key(th, old), Nat.show(Switch.count(State.entries.all(s), th)))
+  +s1 = State.setting(State.setting(s, Switch.session.key(th, old), oldse), Switch.seen.key(th, old), Nat.show(Switch.count(s, th)))
   State.thread((t => Switch.set(p, m, Setting.get(s1, Switch.session.key(th, p), ""), t)), s1, th)
 
 def State.switch(+s: State, +th: String, +p: String, m: String) -> State:
@@ -1302,6 +1393,123 @@ def Usage.merge(+old: String, +used: Nat, +window: Nat) -> String:
 
 def State.usage(+s: State, +th: String, +used: Nat, +window: Nat) -> State:
   State.setting(s, Usage.key(th), Usage.merge(Setting.get(s, Usage.key(th), ""), used, window))
+
+# Launched threads
+# ----------------
+# A thread started by another (thread_launch) remembers who started it, as
+# the setting launch.<id>: "1" or "0" (whether it reports back) and then
+# the launcher. The launcher's list is the setting launched.<by>: its
+# launched threads one per line, oldest first, each once (law
+# launch_list_once).
+
+def Launch.key(+id: String) -> String:
+  "launch." ++ id
+
+def Launch.list.key(+by: String) -> String:
+  "launched." ++ by
+
+def Launch.val(+by: String, report: Bool) -> String:
+  Bool.pick(String, report, "1", "0") ++ by
+
+# who launched a thread ("" for one nobody launched)
+def Launch.by(s: State, +id: String) -> String:
+  String.drop(Setting.get(s, Launch.key(id), ""), 1n)
+
+# whether a launched thread reports back to its launcher
+def Launch.reports(s: State, +id: String) -> Bool:
+  +v = Setting.get(s, Launch.key(id), "")
+  Bool.and(String.starts_with(v, "1"), Nat.is_gt(String.length(v), 1n))
+
+def Launch.has(xs: List<&2, String>, +id: String) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case +x <> t:
+      Bool.or(String.eq(x, id), Launch.has(t, id))
+
+def Launch.lines(+v: String) -> List<&2, String>:
+  Bool.pick(List<&2, String>, String.is_empty(v), Nil{}, String.split(v, '\n'))
+
+def Launch.add.k(had: Bool, +v: String, +id: String) -> String:
+  match had:
+    case True{}:
+      v
+    case False{}:
+      Bool.pick(String, String.is_empty(v), id, v ++ "\n" ++ id)
+
+# a launcher's list with one more thread (kept once)
+def Launch.add(+v: String, +id: String) -> String:
+  Launch.add.k(Launch.has(Launch.lines(v), id), v, id)
+
+# the threads `by` launched, oldest first
+def Launch.of(s: State, +by: String) -> List<&2, String>:
+  Launch.lines(Setting.get(s, Launch.list.key(by), ""))
+
+def Launch.fold(+s: State, +id: String, +by: String, report: Bool) -> State:
+  State.setting(State.setting(s, Launch.key(id), Launch.val(by, report)), Launch.list.key(by), Launch.add(Setting.get(s, Launch.list.key(by), ""), id))
+
+# Lock records and the name index are projections, never timeline scans.
+def Locks.names(s: State) -> List<&2, String>:
+  Launch.lines(Setting.get(s, "locks.names", ""))
+
+def Locks.get(s: State, +name: String) -> LK.NamedLock:
+  LK.Lock.read(Maybe.default(&2, J.Json, J.Json.parse(Setting.get(s, "lock." ++ name, "")), J.Null{}))
+
+def Locks.fold(+s: State, +name: String, l: LK.NamedLock) -> State:
+  State.setting(State.setting(s, "lock." ++ name, J.Json.show(LK.Lock.json(l))), "locks.names", Launch.add(Setting.get(s, "locks.names", ""), name))
+
+# Wake subscriptions: indexes contain ids, records live under wake.<id>.
+def Wake.strs(xs: List<&2, String>) -> List<&2, J.Json>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case x <> t:
+      J.Str{x} <> Wake.strs(t)
+
+def Wake.record(+id: String, +by: String, +kind: String, +target: String, events: List<&2, String>, once: Bool, note: String, at: Nat) -> J.Json:
+  J.Json.obj([J.KV{"id", J.Str{id}}, J.KV{"by", J.Str{by}}, J.KV{"kind", J.Str{kind}}, J.KV{"target", J.Str{target}}, J.KV{"events", J.Json.arr(Wake.strs(events))}, J.KV{"once", J.Flag{once}}, J.KV{"note", J.Str{note}}, J.KV{"created", J.Num{Nat.show(at)}}])
+
+def Wake.get(s: State, +id: String) -> J.Json:
+  Maybe.default(&2, J.Json, J.Json.parse(Setting.get(s, "wake." ++ id, "")), J.Null{})
+
+def Wake.ids(s: State, +key: String) -> List<&2, String>:
+  Launch.lines(Setting.get(s, key, ""))
+
+def Wake.index(+s: State, +key: String, +id: String) -> State:
+  State.setting(s, key, Launch.add(Setting.get(s, key, ""), id))
+
+def Wake.poll.add(poll: Bool, +s: State, +id: String) -> State:
+  match poll:
+    case True{}:
+      Wake.index(s, "wakes.poll", id)
+    case False{}:
+      s
+
+def Wake.fold(+s: State, +id: String, +by: String, +kind: String, +target: String, events: List<&2, String>, once: Bool, note: String, at: Nat) -> State:
+  Wake.poll.add(Bool.or(String.eq(kind, "pr"), String.eq(kind, "file")), Wake.index(Wake.index(State.setting(s, "wake." ++ id, J.Json.show(Wake.record(id, by, kind, target, events, once, note, at))), "wakes.by." ++ by, id), "wakes.on." ++ kind ++ ":" ++ target, id), id)
+
+def Wake.keep.k(hit: Bool, +id: String, rest: List<&2, String>) -> List<&2, String>:
+  match hit:
+    case True{}:
+      rest
+    case False{}:
+      id <> rest
+
+def Wake.keep(xs: List<&2, String>, +id: String) -> List<&2, String>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case +h <> t:
+      Wake.keep.k(String.eq(h, id), h, Wake.keep(t, id))
+
+def Wake.unindex(+s: State, +key: String, +id: String) -> State:
+  State.setting(s, key, String.join(Wake.keep(Wake.ids(s, key), id), "\n"))
+
+def Wake.drop.record(+o: J.Json, +s: State, +id: String) -> State:
+  State.setting(Wake.unindex(Wake.unindex(Wake.unindex(s, "wakes.poll", id), "wakes.by." ++ J.Json.get_str(o, "by", ""), id), "wakes.on." ++ J.Json.get_str(o, "kind", "") ++ ":" ++ J.Json.get_str(o, "target", ""), id), "wake." ++ id, "")
+
+def Wake.drop(+s: State, +id: String) -> State:
+  Wake.drop.record(Wake.get(s, id), s, id)
 
 # Forks
 # -----
@@ -1425,6 +1633,92 @@ def State.woke.k(busy: Bool, s: State, +bot: String, +hop: Nat) -> State:
 def State.woke(+s: State, +bot: String, +hop: Nat) -> State:
   State.woke.k(State.busy_bot(s, bot), s, bot, hop)
 
+# The uberbot's op log (ubop.bend, ubersync.bend, docs/uber.md)
+# --------------------------------------------------------------
+# An op is taken only as its origin's next (n = highest seen + 1), so what
+# a machine has from an origin is always 1..n. Taken, it is kept as a line
+# (uber.op.<uid>.<origin>.<n>), moves that origin's count (uber.vv...) and
+# the clock (uber.hlc...), and writes its register (uber.r.<uid>.<key>,
+# its stamp in uber.rs...) only if it is later than the one there: the
+# same ops in any order leave the same registers. A "fired" op keeps the
+# highest slot a routine ran for (uber.fired...) and who ran it.
+
+# the op that held the register before is now a nop line
+def State.uber.nop.k(ps: List<&2, String>, +s: State, +uid: String, +ostamp: String) -> State:
+  match ps:
+    case +o <> +c <> Nil{}:
+      State.setting(s, UO.Ub.key.op(uid, o, Switch.num(c, 0n)), UO.Ub.line.nop(uid, o, Switch.num(c, 0n), ostamp))
+    case _:
+      s
+
+def State.uber.nop(+s: State, +uid: String, +rn: String, +ostamp: String) -> State:
+  State.uber.nop.k(String.split(rn, '.'), s, uid, ostamp)
+
+def State.uber.reg.k(win: Bool, +s: State, +uid: String, +key: String, +stamp: String, +op: String, +origin: String, +n: Nat) -> State:
+  match win:
+    case True{}:
+      State.setting(State.setting(State.setting(State.uber.nop(s, uid, Setting.get(s, UO.Ub.key.rn(uid, key), ""), Setting.get(s, UO.Ub.key.stamp(uid, key), "")),
+        UO.Ub.key.reg(uid, key), op), UO.Ub.key.stamp(uid, key), stamp), UO.Ub.key.rn(uid, key), origin ++ "." ++ Nat.show(n))
+    case False{}:
+      s
+
+def State.uber.reg(+s: State, +uid: String, +key: String, +stamp: String, +op: String, +origin: String, +n: Nat) -> State:
+  State.uber.reg.k(UO.Ub.newer(key, op, stamp, Setting.get(s, UO.Ub.key.reg(uid, key), ""), Setting.get(s, UO.Ub.key.stamp(uid, key), "")),
+    s, uid, key, stamp, op, origin, n)
+
+def State.uber.fired.k(win: Bool, +s: State, +uid: String, +origin: String, +gid: String, +slot: Nat) -> State:
+  match win:
+    case True{}:
+      State.setting(State.setting(s, UO.Ub.key.fired(uid, gid), Nat.show(slot)), UO.Ub.key.by(uid, gid), origin)
+    case False{}:
+      s
+
+def State.uber.fired(+s: State, +uid: String, +origin: String, +o: J.Json) -> State:
+  State.uber.fired.k(Nat.is_gt(UO.Ub.nat(o, "slot"), Switch.num(Setting.get(s, UO.Ub.key.fired(uid, UO.Ub.field(o, "routine")), "0"), 0n)),
+    s, uid, origin, UO.Ub.field(o, "routine"), UO.Ub.nat(o, "slot"))
+
+def State.uber.body.k(fired: Bool, +s: State, +uid: String, +origin: String, +n: Nat, +stamp: String, +op: String, +key: String) -> State:
+  match fired:
+    case True{}:
+      State.uber.fired(s, uid, origin, UO.Ub.json(op))
+    case False{}:
+      Bool.pick(State, String.is_empty(key), s, State.uber.reg(s, uid, key, stamp, op, origin, n))
+
+def State.uber.body(+s: State, +uid: String, +origin: String, +n: Nat, +stamp: String, +op: String) -> State:
+  State.uber.body.k(String.eq(UO.Ub.op.kind(op), "fired"), s, uid, origin, n, stamp, op, UO.Ub.op.key(op))
+
+def State.uber.origins(+s: State, +uid: String, +origin: String, +n: Nat) -> State:
+  Bool.pick(State, Nat.is_eq(n, 1n), State.setting(s, UO.Ub.key.origins(uid), UO.Ub.origins.add(Setting.get(s, UO.Ub.key.origins(uid), ""), origin)), s)
+
+def State.uber.hlc(+s: State, +uid: String, +stamp: String) -> State:
+  Bool.pick(State, UO.Ub.stamp.gt(stamp, Setting.get(s, UO.Ub.key.hlc(uid), "")), State.setting(s, UO.Ub.key.hlc(uid), stamp), s)
+
+# an op that lost its register is kept as a nop at once
+def State.uber.line(keep: Bool, +uid: String, +origin: String, +n: Nat, +stamp: String, +op: String, +at: Nat) -> String:
+  match keep:
+    case True{}:
+      UO.Ub.line(uid, origin, n, stamp, op, at)
+    case False{}:
+      UO.Ub.line.nop(uid, origin, n, stamp)
+
+def State.uber.keep.k(free: Bool, +s: State, +uid: String, +stamp: String, +op: String, +key: String) -> Bool:
+  Bool.or(free, UO.Ub.newer(key, op, stamp, Setting.get(s, UO.Ub.key.reg(uid, key), ""), Setting.get(s, UO.Ub.key.stamp(uid, key), "")))
+
+def State.uber.keep(+s: State, +uid: String, +stamp: String, +op: String) -> Bool:
+  State.uber.keep.k(Bool.or(String.eq(UO.Ub.op.kind(op), "fired"), String.is_empty(UO.Ub.op.key(op))), s, uid, stamp, op, UO.Ub.op.key(op))
+
+def State.uberop.k(ok: Bool, +s: State, +uid: String, +origin: String, +n: Nat, +stamp: String, +op: String, +at: Nat) -> State:
+  match ok:
+    case True{}:
+      State.uber.body(State.uber.hlc(State.uber.origins(State.setting(State.setting(s, UO.Ub.key.vv(uid, origin), Nat.show(n)),
+        UO.Ub.key.op(uid, origin, n), State.uber.line(State.uber.keep(s, uid, stamp, op), uid, origin, n, stamp, op, at)), uid, origin, n), uid, stamp), uid, origin, n, stamp, op)
+    case False{}:
+      s
+
+def State.uberop(+s: State, +uid: String, +origin: String, +n: Nat, +stamp: String, +op: String, +at: Nat) -> State:
+  State.uberop.k(Bool.and(Nat.is_eq(n, Nat.add(Switch.num(Setting.get(s, UO.Ub.key.vv(uid, origin), "0"), 0n), 1n)), Bool.not(String.is_empty(origin))),
+    s, uid, origin, n, stamp, op, at)
+
 def State.apply.go(s: State, e: Change) -> State:
   match e:
     case ProjectCreated{id, title, root, at}:
@@ -1515,6 +1809,10 @@ def State.apply.go(s: State, e: Change) -> State:
       State.world((w => BT.World.mem_saved(w, bot, key, kind, text, tags, at)), s)
     case MemoryForgot{bot, key, _}:
       State.world((w => BT.World.mem_forgot(w, bot, key)), s)
+    case TaskSet{bot, slug, json, _}:
+      State.world((w => BT.World.task_set(w, bot, slug, json)), s)
+    case TaskDeleted{bot, slug, _}:
+      State.world((w => BT.World.task_del(w, bot, slug)), s)
     case SpaceSet{bot, spec, _}:
       State.world((w => BT.World.space_set(w, bot, spec)), s)
     case PeerSet{id, name, url, revoked, at}:
@@ -1525,6 +1823,26 @@ def State.apply.go(s: State, e: Change) -> State:
       State.world((w => BT.World.spage_set(w, bot, html, at)), s)
     case WorkSet{+th, +kind, rows, _}:
       State.setting(s, kind ++ "." ++ th, rows)
+    case UberSet{bot, uid, _}:
+      State.setting(State.setting(s, "uber.bot", bot), "uber.uid", uid)
+    case UberOp{+uid, +origin, +n, +stamp, +op, at}:
+      State.uberop(s, uid, origin, n, stamp, op, at)
+    case ThreadLaunched{+id, +by, report, _}:
+      Launch.fold(s, id, by, report)
+    case WakeSet{id, by, kind, target, events, once, note, at}:
+      Wake.fold(s, id, by, kind, target, events, once, note, at)
+    case WakeDropped{id, _}:
+      Wake.drop(s, id)
+    case LockChanged{name, l, _}:
+      Locks.fold(s, name, l)
+    case RoutinePlan{id, once, tz, kind, _}:
+      State.world((w => BT.World.routine_plan(w, id, once, tz, kind)), s)
+    case RoutineSlot{id, slot, _}:
+      State.world((w => BT.World.routine_slot(w, id, slot)), s)
+    case RoutineDone{id, _}:
+      State.world((w => BT.World.routine_done(w, id)), s)
+    case Reminded{+id, _, thread, text, +at}:
+      State.post(s, Act{"remind:" ++ id ++ ":" ++ Nat.show(at), thread, "remind", "reminder", text, at})
     case TodosSet{+th, todos, _}:
       State.setting(s, "todos." ++ th, todos)
     case ProviderSet{+id, +p, m, _}:
@@ -2525,6 +2843,32 @@ def Work.kids.map(+s: State) -> Map<&2, Nat>:
     case State{_, _, _, _, +tk, _, _, _, _, _, _}:
       Work.kids.fold(Map.values(&2, Task, tk), Map.new(&2, Nat))
 
+# every thread's own rows (Work.rows) in one pass over the settings that hold
+# them ("bg.<thread>", "watch.<thread>"), for the screens that ask of many
+# threads: a lookup in this small map beats two in the settings
+def Work.rows.id(+k: String, +pre: String) -> String:
+  Bool.pick(String, String.starts_with(k, pre), String.drop(k, String.length(pre)), "")
+
+def Work.rows.put.k(none: Bool, +s: State, +th: String, m: Map<&2, Nat>) -> Map<&2, Nat>:
+  match none:
+    case True{}:
+      m
+    case False{}:
+      Map.set(&2, Nat, m, th, Work.rows(s, th))
+
+def Work.rows.put(+s: State, +th: String, m: Map<&2, Nat>) -> Map<&2, Nat>:
+  Work.rows.put.k(String.is_empty(th), s, th, m)
+
+def Work.rows.go(ks: List<&2, String>, +s: State, m: Map<&2, Nat>) -> Map<&2, Nat>:
+  match ks:
+    case Nil{}:
+      m
+    case +k <> t:
+      Work.rows.go(t, s, Work.rows.put(s, Work.rows.id(k, "bg."), Work.rows.put(s, Work.rows.id(k, "watch."), m)))
+
+def Work.rows.map(+s: State) -> Map<&2, Nat>:
+  Work.rows.go(Setting.keys(s), s, Map.new(&2, Nat))
+
 def Work.kids.at.k(r: Map<&2, Nat> & Nat) -> Nat:
   (_, n) = r
   n
@@ -2532,6 +2876,10 @@ def Work.kids.at.k(r: Map<&2, Nat> & Nat) -> Nat:
 # Work.busy with the children counted once for every thread (Work.kids.map)
 def Work.busy.at(+m: Map<&2, Nat>, +s: State, +th: String) -> Nat:
   Nat.add(Work.kids.at.k(Map.get(Nat, 0n, m, th)), Work.rows(s, th))
+
+# Work.busy.at with the rows from Work.rows.map (one pass), not two lookups in the settings
+def Work.busy.m(+kids: Map<&2, Nat>, +rows: Map<&2, Nat>, +th: String) -> Nat:
+  Nat.add(Work.kids.at.k(Map.get(Nat, 0n, kids, th)), Work.kids.at.k(Map.get(Nat, 0n, rows, th)))
 
 def Work.row.title(+l: String) -> String:
   Bool.pick(String, String.is_empty(Bg.title(l)), Bg.doing(l), Bg.title(l))

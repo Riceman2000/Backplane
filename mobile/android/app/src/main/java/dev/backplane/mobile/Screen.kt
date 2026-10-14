@@ -49,7 +49,11 @@ data class Renaming(val id: String, val title: String, val text: String, val yes
 // the first-run tour's step on screen (core/onboard.bend): the counter
 // ("3 of 8"), title and text, the buttons' labels; actions "ob-skip",
 // "ob-back" (not on the first step) and "ob-next"
-data class Tour(val counter: String, val title: String, val body: String, val next: String, val back: String, val skip: String, val first: Boolean)
+data class Tour(val counter: String, val title: String, val body: String, val next: String, val back: String, val skip: String, val first: Boolean,
+    // the uberbot step's buttons: each sends its action and value as they are
+    val choices: List<TourChoice> = emptyList())
+
+data class TourChoice(val label: String, val action: String, val value: String)
 
 // the list's search, always at its top: its query ("proj-find-q"), the hint
 data class Search(val open: Boolean, val query: String, val hint: String)
@@ -89,7 +93,7 @@ data class Entry(
     val id: String, val kind: String, val text: String,
     val tone: String, val label: String, val blocks: List<Block>,
     val attachments: List<Chip> = emptyList(), val images: List<Shot> = emptyList(),
-    val open: Boolean = false, val value: String = "", val key: String = "",
+    val open: Boolean = false, val value: String = "", val key: String = "", val at: String = "",
 )
 
 // what the agent waits on the user for: an approval, a question or a
@@ -145,6 +149,26 @@ data class Settings(val rows: List<SetRow>)
 data class Find(val mode: String, val query: String, val rows: List<FolderRow>)
 
 // the board viewer (src/mobile/view.bend): the source open ("" closed),
+// the Review tab: page chips ("rv-page" page), the title, the report's
+// Markdown nodes (empty: say note), whether it is being made
+data class ReviewTab(val page: String, val label: String, val on: Boolean)
+data class ReviewPage(val tabs: List<ReviewTab>, val title: String, val note: String, val busy: Boolean, val blocks: List<Block>, val checks: ReviewChecks? = null, val release: ReleaseForm? = null)
+
+// the Release page's form: the tag that will be made (the field, else the proposed one), the proposed one, the two toggles, why not ("")
+data class ReleaseForm(val tag: String, val next: String, val publish: Boolean, val force: Boolean, val err: String, val text: String = "")
+
+// the Checks page's boxes ("rv-tick" index) and why the gate fails ("" it passes)
+data class ReviewTask(val index: Int, val text: String, val group: String, val done: Boolean)
+data class ReviewChecks(val gate: String, val line: String, val tasks: List<ReviewTask>)
+
+// Review comments (client.bend's Rc): the pins, at places in mm of the
+// file's coordinates ("rv-pin" id opens one), the one open, and the place
+// waiting for its note ("x\ty\tlayer\titem", "" none)
+data class ReviewPin(val id: String, val x: Float, val y: Float, val resolved: Boolean, val count: Int)
+data class ReviewReply(val text: String, val by: String)
+data class ReviewOpen(val id: String, val text: String, val by: String, val place: String, val resolved: Boolean, val replies: List<ReviewReply>)
+data class ReviewComments(val pins: List<ReviewPin>, val open: ReviewOpen?, val at: String)
+
 // the key its plots carry, the choices, and how to draw
 data class Choice(val label: String, val value: String, val on: Boolean)
 
@@ -174,6 +198,9 @@ data class Viewer(
     val hist: HistBar? = null,
     // the Files tab (open "files"), and an image or a PDF it opened
     val files: FilesPage? = null, val file: FileView? = null,
+    // the Review tab (open "review")
+    val review: ReviewPage? = null,
+    val comments: ReviewComments? = null,
     // the layer focus (core/layers.bend): the layers drawn dimmed (a bit
     // each), the one drawn last (255 none), the list's All/Dim/Only (0-2)
     // and whether it has one (a board), and the Layers button's words
@@ -199,6 +226,8 @@ data class HistBar(
     val n: Int, val at: Int, val title: String, val entry: String, val said: String,
     val playing: Boolean, val diff: Boolean, val cmp: Boolean, val a: String, val b: String, val side: String,
     val ticks: List<HistTick>, val menu: List<HistRow>?, val keys: IntArray,
+    // which of Old, Diff and New shows in a comparison (Rv.showing)
+    val showing: String = "",
 )
 
 data class HistTick(val id: String, val on: Boolean)
@@ -290,16 +319,16 @@ data class Found(val name: String, val url: String)
 // bridge gives once (Core.cats).
 data class BotRow(
     val id: String, val name: String, val mood: String, val note: String, val peer: String, val cat: String,
-    val look: Int, val sel: Boolean, val remote: Boolean, val machine: String, val act: String,
+    val look: Int, val sel: Boolean, val remote: Boolean, val machine: String, val act: String, val nav: String = "",
 )
 
 // a room in the list ("room" sends its id)
-data class RoomRow(val id: String, val name: String, val members: Int, val sel: Boolean, val machine: String)
+data class RoomRow(val id: String, val name: String, val members: Int, val sel: Boolean, val machine: String, val nav: String = "")
 
 // the new bot form: its fields ("bfield" name, persona, provider),
 // "bot-create" makes it, "form-close" "@bnew" drops it
 data class ProviderChoice(val label: String, val provider: String, val on: Boolean)
-data class NewBot(val name: String, val persona: String, val provider: String, val providers: List<ProviderChoice>)
+data class NewBot(val name: String, val persona: String, val provider: String, val providers: List<ProviderChoice>, val hint: String = "Name")
 
 // the new room form: "bfield" rname, "room-pick" a bot's id, "room-save"
 data class RoomPick(val id: String, val name: String, val on: Boolean)
@@ -311,13 +340,16 @@ data class BotMemory(val key: String, val kind: String, val text: String, val ta
 data class BotRoutine(
     val id: String, val name: String, val cron: String, val schedule: String, val prompt: String,
     val last: String, val on: Boolean,
+    // routines-cal: routine, once or reminder; what it says next, in the person's zone
+    val kind: String = "routine", val label: String = "Repeats", val next: String = "", val rel: String = "",
+    val zone: String = "your time", val done: Boolean = false, val doneText: String = "",
 )
 // the routine form ("routine-edit" id, or "" for a new one, opens it)
-data class RoutineForm(val open: Boolean, val id: String, val name: String, val cron: String, val prompt: String)
+data class RoutineForm(val open: Boolean, val id: String, val name: String, val cron: String, val prompt: String, val hint: String = "")
 data class BotHook(val id: String, val name: String, val path: String, val last: String, val count: Int)
 data class BotPeer(val id: String, val name: String, val url: String)
 // Google's sign-in state and the OAuth client's fields ("google" op)
-data class BotGoogle(val status: String, val url: String, val gid: String, val gsecret: String, val gpaste: String, val accounts: List<String>)
+data class BotGoogle(val status: String, val url: String, val gid: String, val gsecret: String, val gpaste: String, val accounts: List<String>, val sigFor: String, val sigText: String)
 data class BotSettings(
     val persona: String, val personaField: String, val invite: String, val purl: String, val join: String,
     val google: BotGoogle, val peers: List<BotPeer>,
@@ -359,6 +391,8 @@ data class Screen(
     val tour: Tour? = null,
     // a thread this phone asked for is still to come (its page opens at once)
     val making: Boolean = false,
+    // the uberbot's card and the status plane (Plane.kt); none without an uberbot
+    val uber: UberCard? = null, val plane: PlaneModel? = null,
 )
 
 data class Cmd(
@@ -405,7 +439,7 @@ private fun entry(o: JSONObject) = Entry(
     o.optString("label"), blocks(o.optJSONArray("blocks")),
     chips(o.optJSONArray("attachments")),
     o.optJSONArray("images").map { Shot(it.optString("path"), it.optString("url")) },
-    o.optBoolean("open"), o.optString("value"), o.optString("key"),
+    o.optBoolean("open"), o.optString("value"), o.optString("key"), o.optString("when"),
 )
 
 private fun tool(o: JSONObject) = Tool(
@@ -509,7 +543,7 @@ private fun viewer(o: JSONObject) = Viewer(
             h.optBoolean("playing"), h.optBoolean("diff"), h.optBoolean("cmp"), h.optString("a"), h.optString("b"), h.optString("side"),
             h.optJSONArray("ticks").map { HistTick(it.optString("id"), it.optBoolean("on")) },
             h.optJSONArray("menu")?.let { a -> a.map { HistRow(it.optString("label"), it.optString("sub"), it.optString("value")) } },
-            ints(h.optJSONArray("keys")))
+            ints(h.optJSONArray("keys")), h.optString("as"))
     },
     files = o.optJSONObject("files")?.let { f ->
         FilesPage(f.optJSONArray("trail").map { FileCrumb(it.optString("label"), it.optString("action"), it.optString("value")) },
@@ -517,6 +551,24 @@ private fun viewer(o: JSONObject) = Viewer(
             f.optBoolean("ready"))
     },
     file = o.optJSONObject("file")?.let { FileView(it.optString("name"), it.optString("kind"), it.optString("url")) },
+    review = o.optJSONObject("review")?.let { r ->
+        ReviewPage(r.optJSONArray("tabs").map { ReviewTab(it.optString("page"), it.optString("label"), it.optBoolean("on")) },
+            r.optString("title"), r.optString("note"), r.optBoolean("busy"), blocks(r.optJSONArray("blocks")),
+            r.optJSONObject("checks")?.let { c ->
+                ReviewChecks(c.optString("gate"), c.optString("line"),
+                    c.optJSONArray("tasks").map { ReviewTask(it.optInt("index"), it.optString("text"), it.optString("group"), it.optBoolean("done")) })
+            },
+            r.optJSONObject("release")?.let { f ->
+                ReleaseForm(f.optString("tag"), f.optString("next"), f.optBoolean("publish"), f.optBoolean("force"), f.optString("err"), f.optString("text"))
+            })
+    },
+    comments = o.optJSONObject("comments")?.let { c ->
+        ReviewComments(c.optJSONArray("pins").map { ReviewPin(it.optString("id"), it.optDouble("x").toFloat(), it.optDouble("y").toFloat(), it.optBoolean("resolved"), it.optInt("count")) },
+            c.optJSONObject("open")?.let { p ->
+                ReviewOpen(p.optString("id"), p.optString("text"), p.optString("by"), p.optString("place"), p.optBoolean("resolved"),
+                    p.optJSONArray("replies").map { ReviewReply(it.optString("text"), it.optString("by")) })
+            }, c.optString("at"))
+    },
     dim = o.optInt("dim"), lift = o.optInt("lift", 255), layerMode = o.optInt("layerMode"), layerModes = o.optBoolean("layerModes"),
     layerHead = o.optString("layerHead", "Layers"),
 )
@@ -542,10 +594,11 @@ private fun botView(o: JSONObject) = BotView(
     },
     o.optJSONArray("routines").map {
         BotRoutine(it.optString("id"), it.optString("name"), it.optString("cron"), it.optString("when"), it.optString("prompt"),
-            it.optString("last"), it.optBoolean("on"))
+            it.optString("last"), it.optBoolean("on"), it.optString("kind", "routine"), it.optString("label", "Repeats"), it.optString("next"),
+            it.optString("rel"), it.optString("zone", "your time"), it.optBoolean("done"), it.optString("doneText"))
     },
     o.optJSONObject("routine")?.let {
-        RoutineForm(it.optBoolean("open"), it.optString("id"), it.optString("name"), it.optString("cron"), it.optString("prompt"))
+        RoutineForm(it.optBoolean("open"), it.optString("id"), it.optString("name"), it.optString("cron"), it.optString("prompt"), it.optString("hint"))
     },
     o.optJSONArray("hooks").map {
         BotHook(it.optString("id"), it.optString("name"), it.optString("path"), it.optString("last"), it.optInt("count"))
@@ -554,7 +607,7 @@ private fun botView(o: JSONObject) = BotView(
         val g = st.optJSONObject("google") ?: JSONObject()
         BotSettings(st.optString("persona"), st.optString("personaField"), st.optString("invite"), st.optString("purl"),
             st.optString("join"),
-            BotGoogle(g.optString("status"), g.optString("url"), g.optString("gid"), g.optString("gsecret"), g.optString("gpaste"), strs(g.optJSONArray("accounts"))),
+            BotGoogle(g.optString("status"), g.optString("url"), g.optString("gid"), g.optString("gsecret"), g.optString("gpaste"), strs(g.optJSONArray("accounts")), g.optString("sigFor"), g.optString("sigText")),
             st.optJSONArray("peers").map { BotPeer(it.optString("id"), it.optString("name"), it.optString("url")) })
     },
     o.optJSONArray("posts").map {
@@ -587,14 +640,15 @@ fun parseScreen(o: JSONObject) = Screen(
     o.optJSONArray("bots").map {
         BotRow(it.optString("id"), it.optString("name"), it.optString("mood"), it.optString("note"), it.optString("peer"),
             it.optString("cat"), it.optInt("look"), it.optBoolean("sel"), it.optBoolean("remote"), it.optString("machine"),
-            it.optString("act", if (it.optBoolean("remote")) "remote" else "bot"))
+            it.optString("act", if (it.optBoolean("remote")) "remote" else "bot"), it.optString("nav"))
     },
     o.optJSONArray("rooms").map {
-        RoomRow(it.optString("id"), it.optString("name"), it.optInt("members"), it.optBoolean("sel"), it.optString("machine"))
+        RoomRow(it.optString("id"), it.optString("name"), it.optInt("members"), it.optBoolean("sel"), it.optString("machine"), it.optString("nav"))
     },
     o.optJSONObject("newBot")?.let { f ->
         NewBot(f.optString("name"), f.optString("persona"), f.optString("provider"),
-            f.optJSONArray("providers").map { ProviderChoice(it.optString("label"), it.optString("provider"), it.optBoolean("on")) })
+            f.optJSONArray("providers").map { ProviderChoice(it.optString("label"), it.optString("provider"), it.optBoolean("on")) },
+            f.optString("hint", "Name"))
     },
     o.optJSONObject("newRoom")?.let { f ->
         NewRoom(f.optString("name"), f.optJSONArray("picks").map { RoomPick(it.optString("id"), it.optString("name"), it.optBoolean("on")) })
@@ -616,6 +670,8 @@ fun parseScreen(o: JSONObject) = Screen(
     o.optString("theme"),
     view = o.optString("view").ifEmpty { "projects" },
     making = o.optBoolean("making"),
+    uber = o.optJSONObject("uber")?.let(::parseUber),
+    plane = o.optJSONObject("plane")?.let(::parsePlane),
     active = o.optJSONArray("active").map(::row),
     older = o.optJSONObject("older")?.let { Older(it.optInt("count"), it.optBoolean("open")) },
     settled = o.optJSONObject("settled")?.let { Older(it.optInt("count"), it.optBoolean("open")) },
@@ -628,7 +684,8 @@ fun parseScreen(o: JSONObject) = Screen(
         Renaming(it.optString("id"), it.optString("title"), it.optString("text"), it.optString("yes"), it.optString("no"))
     },
     tour = o.optJSONObject("tour")?.let {
-        Tour(it.optString("counter"), it.optString("title"), it.optString("body"), it.optString("next"), it.optString("back"), it.optString("skip"), it.optBoolean("first"))
+        Tour(it.optString("counter"), it.optString("title"), it.optString("body"), it.optString("next"), it.optString("back"), it.optString("skip"), it.optBoolean("first"),
+            it.optJSONArray("choices")?.let { a -> (0 until a.length()).map { i -> a.getJSONObject(i).let { c -> TourChoice(c.optString("label"), c.optString("action"), c.optString("value")) } } } ?: emptyList())
     },
 )
 

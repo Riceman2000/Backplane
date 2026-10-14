@@ -1,6 +1,7 @@
 import Base
 import ./json.bend as J
 import ./model.bend as M
+import ./review.bend as RVW
 import ./codec.bend as C
 import ./attach.bend as AT
 import ./agent.bend as AG
@@ -9,6 +10,17 @@ import ./todo.bend as TD
 import ./fm.bend as FM
 import ./refs.bend as RF
 import ./emb.bend as EM
+import ./far.bend as FR
+import ./ubersync.bend as UBS
+import ./bot.bend as BT
+import ./tz.bend as TZ
+import ./sched.bend as SC
+import ./notice.bend as NO
+import ./wake.bend as WK
+import ./told.bend as TLD
+import ./deploy.bend as DP
+import ./version.bend as VER
+import ./locks.bend as LK
 
 # The decider. Requests from clients and lines from agents come in; changes
 # (persisted, folded into the read model) and effects (run by the server)
@@ -16,6 +28,7 @@ import ./emb.bend as EM
 
 # what the server must do after a step
 type Out is Data:
+  LockGuard{name: String, old: String, holder: String}
   # to one client
   Send{client: U32, text: String}
   # to every client
@@ -38,6 +51,9 @@ type Out is Data:
   # run one Codex turn (a process per turn; `session` resumes)
   CodexTurn{thread: String, cwd: String, model: String, session: String, runtime: M.RuntimeMode, text: String}
   GrokTurn{thread: String, cwd: String, model: String, session: String, runtime: M.RuntimeMode, text: String}
+  MuseTurn{thread: String, cwd: String, model: String, session: String, runtime: M.RuntimeMode, text: String}
+  # Google's Antigravity agent over ACP (core/agy.bend)
+  AgyTurn{thread: String, cwd: String, model: String, session: String, runtime: M.RuntimeMode, text: String}
   # a turn ended: "completed", "failed", or "stopped" (Stop, archive,
   # delete: no alert, but the phones' island still hears of it)
   TurnEnded{thread: String, state: String}
@@ -76,6 +92,26 @@ type Out is Data:
   # a thread's streamed text: kept by the server (core/live.bend) until its
   # message is posted or its turn ends, and sent as a delta
   Live{thread: String, text: String}
+  # the outbox of reports to launchers on other machines (the setting
+  # launch.far, Lr.far.*) is due to be sent, in order
+  LaunchFar{}
+  # an alert record of the thread was written (Alert.outs): the server
+  # reads it and pushes the alert, shows it on the desk used last and tells
+  # the owner's other machines (not persisted)
+  Alerted{thread: String}
+  WakePoll{prs: List<&2, String>, files: List<&2, String>}
+  # a deploy waits and no tool call runs: look at the build locks (the server
+  # answers with Msg DeployLocks, Hub.deploy_locks)
+  DeployProbe{}
+  # a tool call of a thread started / ended, or every call of a thread ended
+  # (its turn, its agent): the server keeps the open ones in memory for the
+  # deploy check (core/deploy.bend's Open.*); never written to the log
+  ToolOpen{thread: String, call: String}
+  ToolShut{thread: String, call: String}
+  ToolsGone{thread: String}
+  # the deploy goes: swap the staged package in (when stage is set), then
+  # restart into it
+  DeployGo{stage: String}
 
 type Step is Data:
   Step{changes: List<&2, M.Change>, outs: List<&2, Out>}
@@ -105,6 +141,12 @@ def Island.touch(cs: List<&2, M.Change>) -> Bool:
       True{}
     case M.ThreadDeleted{_, _} <> _:
       True{}
+    # a thread's background rows cleared (its agent or the hub that owned
+    # them is gone: Bg.gone, Rec.lost*): what it waited on is no more, so
+    # the Live Activity drops its "waiting on N" now, not at the next beat.
+    # Only a clear: rows change at every subagent step, and each push costs
+    case M.WorkSet{_, +kind, +v, _} <> t:
+      Bool.or(Bool.and(String.eq(kind, "bg"), String.is_empty(v)), Island.touch(t))
     case _ <> t:
       Island.touch(t)
 
@@ -128,6 +170,66 @@ def Island.outs.k(due: Bool, os: List<&2, Out>) -> List<&2, Out>:
 def Island.outs(+cs: List<&2, M.Change>, +os: List<&2, Out>) -> List<&2, Out>:
   Island.outs.k(Bool.and(Island.touch(cs), Bool.not(Island.told(os))), os)
 
+# Alerts
+# ------
+# Every step passes through here before it is stored (the server's
+# Hub.step.ok): an ask opened for the person gets its record in the same
+# step (NO.Policy.ask), and every record written with a kind tells the
+# server (Alerted), so alerts come from one place whatever path made them
+# (laws policy_ask_alerts, policy_alerted_*).
+
+def Alerts.has(cs: List<&2, M.Change>) -> Bool:
+  match cs:
+    case Nil{}:
+      False{}
+    case M.AskOpened{_, _, _, _, _, _, _} <> _:
+      True{}
+    case _ <> t:
+      Alerts.has(t)
+
+def Alerts.asks(+post: M.State, cs: List<&2, M.Change>) -> List<&2, M.Change>:
+  match cs:
+    case Nil{}:
+      Nil{}
+    case M.AskOpened{_, +th, _, +tool, +d, _, +at} <> t:
+      List.append(&2, M.Change, NO.Policy.ask(post, at, th, tool, d), Alerts.asks(post, t))
+    case _ <> t:
+      Alerts.asks(post, t)
+
+def Alerts.changes.k(has: Bool, +st: M.State, +cs: List<&2, M.Change>) -> List<&2, M.Change>:
+  match has:
+    case True{}:
+      List.append(&2, M.Change, cs, Alerts.asks(M.State.replay(cs, st), cs))
+    case False{}:
+      cs
+
+# the step's changes with the records of the asks it opens
+# with what the person was told (told.bend's Told.after: every record that
+# alerts is marked, under its key)
+def Alerts.changes(+st: M.State, +cs: List<&2, M.Change>) -> List<&2, M.Change>:
+  TLD.Told.after(st, Alerts.changes.k(Alerts.has(cs), st, cs))
+
+# a record that alerts: its setting key starts "alert." and its kind (the
+# value's first field) is not empty
+def Alerts.is(+k: String, +v: String) -> Bool:
+  Bool.and(String.starts_with(k, "alert."), Bool.not(String.starts_with(v, "\t")))
+
+def Alerts.add(hit: Bool, +k: String, os: List<&2, Out>) -> List<&2, Out>:
+  match hit:
+    case True{}:
+      List.append(&2, Out, os, [Alerted{String.drop(k, 6n)}])
+    case False{}:
+      os
+
+def Alerts.outs(cs: List<&2, M.Change>, os: List<&2, Out>) -> List<&2, Out>:
+  match cs:
+    case Nil{}:
+      os
+    case M.SettingSet{+k, +v, _} <> t:
+      Alerts.outs(t, Alerts.add(Alerts.is(k, v), k, os))
+    case _ <> t:
+      Alerts.outs(t, os)
+
 # Replies
 # -------
 
@@ -141,6 +243,10 @@ def Reply.made(+client: U32, +id: String, +thread: String) -> Out:
 
 def Reply.err(+client: U32, +id: String, msg: String) -> Out:
   Send{client, J.Json.show(J.Json.obj([J.KV{"t", J.Str{"reply"}}, J.KV{"id", J.Num{id}}, J.KV{"ok", J.Flag{False{}}}, J.KV{"error", J.Str{msg}}]))}
+
+# the answer to a request that returns a value
+def Reply.data(+client: U32, +id: String, +v: J.Json) -> Out:
+  Send{client, J.Json.show(J.Json.obj([J.KV{"t", J.Str{"reply"}}, J.KV{"id", J.Num{id}}, J.KV{"ok", J.Flag{True{}}}, J.KV{"result", v}]))}
 
 def Step.reply(+client: U32, +id: String, cs: List<&2, M.Change>) -> Step:
   Step{cs, [Reply.ok(client, id)]}
@@ -285,15 +391,19 @@ def Hub.title.k(fresh: Bool, +thread: String, +text: String, +now: Nat, rest: Li
       rest
 
 # the effects that run one turn of a thread's agent, by provider: Claude
-# keeps one process per thread fed with stream-json; Codex and Grok run a
-# process per turn, resuming their session (Grok over ACP, reported in
-# Codex's event shapes)
+# keeps one process per thread fed with stream-json; Codex, Grok, Muse and
+# Antigravity run a process per turn, resuming their session (Grok and
+# Antigravity over ACP, Muse over MSP, all reported in Codex's event shapes)
 def Hub.run.k(i: Nat, +thread: String, +cwd: String, +provider: String, +model: String, +session: String, runtime: M.RuntimeMode, interaction: M.InteractionMode, +text: String, +uuid: String) -> List<&2, Out>:
   match i:
     case 1n:
       [CodexTurn{thread, cwd, model, session, runtime, text}]
     case 2n:
       [GrokTurn{thread, cwd, model, session, runtime, text}]
+    case 3n:
+      [MuseTurn{thread, cwd, model, session, runtime, text}]
+    case 4n:
+      [AgyTurn{thread, cwd, model, session, runtime, text}]
     case _:
       [AgentStart{thread, cwd, provider, model, session, runtime, interaction}, Claude.send(thread, cwd, text, uuid)]
 
@@ -301,7 +411,7 @@ def Hub.run.k(i: Nat, +thread: String, +cwd: String, +provider: String, +model: 
 def Hub.run(t: M.Thread, +cwd: String, +text: String, +uuid: String) -> List<&2, Out>:
   match t:
     case M.Thread{+id, _, _, _, _, _, _, _, _, _, _, _, _, _, _, +provider, model, runtime, interaction, session, _}:
-      Hub.run.k(C.Codec.pos(["claude", "codex", "grok"], provider), id, cwd, provider, model, session, runtime, interaction, text, uuid)
+      Hub.run.k(C.Codec.pos(["claude", "codex", "grok", "muse", "antigravity"], provider), id, cwd, provider, model, session, runtime, interaction, text, uuid)
 
 def Hub.post.go(wait: Bool, +t: M.Thread, +cwd: String, +queued: String, +now: Nat, +thread: String, +msg: String, role: M.Role, +text: String) -> Step:
   match wait:
@@ -824,8 +934,9 @@ def Wt.start.k(go: Bool, +first: Bool, +t: M.Thread, +cwd: String, +queued: Stri
 def Merge.found(due: Bool, +s: M.State, +now: Nat, +client: U32, +id: String, +thread: String, +url: String) -> Step:
   match due:
     case True{}:
-      Step.reply(client, id, [M.ThreadMerged{thread, url, now},
-        M.ActivityLogged{thread, Hub.id("g", now, Hub.seq(s)), "info", "git", "merged" ++ Bool.pick(String, String.is_empty(url), "", ": " ++ url), now}])
+      Step.reply(client, id, List.append(&2, M.Change, [M.ThreadMerged{thread, url, now},
+        M.ActivityLogged{thread, Hub.id("g", now, Hub.seq(s)), "info", "git", "merged" ++ Bool.pick(String, String.is_empty(url), "", ": " ++ url), now}],
+        NO.Policy.merged(s, now, thread, url)))
     case False{}:
       Step.outs([Reply.ok(client, id)])
 
@@ -856,6 +967,80 @@ def Desk.request(look: Bool, +client: U32, +id: String, +p: J.Json) -> Step:
     case False{}:
       Step.outs([Reply.err(client, id, "unknown method")])
 
+# Design review (docs/design-review.md): requests the server answers from
+# the thread's folder (server/review.bend's RvJob, jobs "rv.…").
+# history.resolve {thread, side, ref}: any commit, branch or tag typed in;
+# review.bom {thread, a, b}: a BOM, or the change between two versions;
+# review.checks {thread, commit, trigger}: the design checks;
+# review.tick {thread, index}: a checklist box ticked or cleared;
+# review.comment {thread, op, ...}: a comment added, answered, resolved,
+# reopened, edited or dropped (core/review.bend's Review.act), by the person;
+# review.release {thread, tag, publish, force}: a release (server/review.bend)
+def Rv.methods() -> List<&2, String>:
+  ["history.resolve", "review.bom", "review.checks", "review.tick", "review.comment", "review.release", "zone.report", "zone.set"]
+
+# The person's time zone (core/sched.bend's Zone.*)
+# zone.report {zone}: a phone says where it is; kept as person.tz.device when
+# it differs (the server looks the zone's rules up on its tick).
+# zone.set {zone}: Settings sets the person's own ("" or "auto" follows the
+# phone); a zone the hub has no rules for yet is looked up first
+# (BotFx "zone"), and set only if that works.
+
+def Zone.report.k(ok: Bool, same: Bool, +client: U32, +id: String, +zone: String, +now: Nat) -> Step:
+  match ok same:
+    case False{} _:
+      Step.outs([Reply.err(client, id, "not a time zone name")])
+    case True{} True{}:
+      Step.outs([Reply.ok(client, id)])
+    case True{} False{}:
+      Step.reply(client, id, [M.SettingSet{"person.tz.device", zone, now}])
+
+def Zone.report(+s: M.State, +now: Nat, +client: U32, +id: String, +zone: String) -> Step:
+  Zone.report.k(SC.Zone.valid(zone), String.eq(M.Setting.get(s, "person.tz.device", ""), zone), client, id, zone, now)
+
+def Zone.set.k(auto: Bool, ok: Bool, known: Bool, +client: U32, +id: String, +zone: String, +now: Nat) -> Step:
+  match auto ok known:
+    case True{} _ _:
+      Step.reply(client, id, [M.SettingSet{"person.tz", "", now}])
+    case False{} False{} _:
+      Step.outs([Reply.err(client, id, "that is not a time zone name (like Europe/Helsinki)")])
+    case False{} True{} True{}:
+      Step.reply(client, id, [M.SettingSet{"person.tz", zone, now}])
+    case False{} True{} False{}:
+      Step.outs([BotFx{"zone", zone, U32.show(client), id}])
+
+def Zone.set(+s: M.State, +now: Nat, +client: U32, +id: String, +zone: String) -> Step:
+  Zone.set.k(Bool.or(String.is_empty(zone), String.eq(zone, "auto")), SC.Zone.valid(zone), BT.Maybe.is(TZ.TzRule, SC.Zone.rule(s, zone)), client, id, zone, now)
+
+def Rv.comment.k(ok: Bool, +s: M.State, +now: Nat, +client: U32, +id: String, +p: J.Json) -> Step:
+  match ok:
+    case True{}:
+      Step.reply(client, id, [RVW.Review.act(J.Json.get_str(p, "thread", ""), Hub.id("r", now, Hub.seq(s)), p, "person", now)])
+    case False{}:
+      Step.outs([Reply.err(client, id, "a comment needs its text (or the comment it is about)")])
+
+def Rv.request(i: Nat, +s: M.State, +now: Nat, +client: U32, +id: String, +p: J.Json, +m: String) -> Step:
+  match i:
+    case 0n:
+      Hub.git(s, client, id, "rv.resolve", J.Json.get_str(p, "thread", ""), J.Json.get_str(p, "side", "a"), J.Json.get_str(p, "ref", ""))
+    case 1n:
+      Hub.git(s, client, id, "rv.bom", J.Json.get_str(p, "thread", ""), J.Json.get_str(p, "a", ""), J.Json.get_str(p, "b", ""))
+    case 2n:
+      Hub.git(s, client, id, "rv.checks", J.Json.get_str(p, "thread", ""), J.Json.get_str(p, "commit", ""), J.Json.get_str(p, "trigger", "manual"))
+    case 3n:
+      Hub.git(s, client, id, "rv.tick", J.Json.get_str(p, "thread", ""), J.Json.as_raw(J.Json.get(p, "index"), "0"), "")
+    case 4n:
+      Rv.comment.k(Bool.and(RVW.Review.op.ok(J.Json.get_str(p, "op", ""), p), Bool.not(String.is_empty(J.Json.get_str(p, "thread", "")))), s, now, client, id, p)
+    case 5n:
+      Hub.git(s, client, id, "rv.release", J.Json.get_str(p, "thread", ""), J.Json.get_str(p, "tag", ""),
+        Bool.pick(String, J.Json.get_bool(p, "publish", False{}), "p", "") ++ Bool.pick(String, J.Json.get_bool(p, "force", False{}), "f", ""))
+    case 6n:
+      Zone.report(s, now, client, id, String.trim(J.Json.get_str(p, "zone", "")))
+    case 7n:
+      Zone.set(s, now, client, id, String.trim(J.Json.get_str(p, "zone", "")))
+    case _:
+      Desk.request(String.eq(m, "desk.look"), client, id, p)
+
 def Hub.media(i: Nat, +s: M.State, +now: Nat, +client: U32, +id: String, +p: J.Json, +m: String) -> Step:
   match i:
     case 0n:
@@ -870,14 +1055,14 @@ def Hub.media(i: Nat, +s: M.State, +now: Nat, +client: U32, +id: String, +p: J.J
     case 3n:
       Hub.git(s, client, id, "refs", J.Json.get_str(p, "thread", ""), "", "")
     case _:
-      Desk.request(String.eq(m, "desk.look"), client, id, p)
+      Rv.request(C.Codec.pos(Rv.methods(), m), s, now, client, id, p, m)
 
 def Hub.methods() -> List<&2, String>:
   ["project.add", "project.remove", "thread.create", "turn.start", "turn.interrupt",
    "thread.settle", "thread.unsettle", "thread.archive", "thread.unarchive",
    "thread.pin", "thread.unpin", "thread.rename", "thread.delete", "kicad.watch", "thread.modes", "app.update", "setting.set", "kicad.install",
    "ask.answer", "device.register", "device.drop", "kicad.info", "queue.resume",
-   "queue.edit", "queue.remove", "queue.move", "queue.steer", "thread.fork", "thread.back", "thread.provider", "update.now", "work.cancel", "task.cancel"]
+   "queue.edit", "queue.remove", "queue.move", "queue.steer", "thread.fork", "thread.back", "thread.provider", "update.now", "work.cancel", "task.cancel", "wake.cancel", "deploy.restart", "deploy.cancel", "deploy.status", "lock.release", "lock.cancel"]
 
 # Agent output (Claude stream-json)
 # ---------------------------------
@@ -1494,6 +1679,109 @@ def Steps.after.if(on: Bool, st: Step, +thread: String, +cwd: String) -> Step:
     case False{}:
       st
 
+# Open tool calls
+# ---------------
+# Where a tool call starts and ends, the hub tells the server (ToolOpen,
+# ToolShut) and the server keeps the open ones in memory, for the safe
+# deploy (core/deploy.bend): Claude's tool_use block opens, the tool_result
+# block of the same id shuts; Codex's item.started opens and item.completed
+# shuts; Grok's, Muse's and Antigravity's logged call opens and its
+# "tool.done" shuts. A turn's end, an archive or a delete shuts every call of
+# the thread (ToolsGone). The requester's own deploy_* call is never opened.
+# Nothing here is written to the log (laws tool_*).
+
+def Tools.open.k(go: Bool, +thread: String, +id: String, rest: List<&2, Out>) -> List<&2, Out>:
+  match go:
+    case True{}:
+      ToolOpen{thread, id} <> rest
+    case False{}:
+      rest
+
+# the tool calls the changes log for a thread's own timeline
+def Tools.opens(cs: List<&2, M.Change>, +thread: String) -> List<&2, Out>:
+  match cs:
+    case Nil{}:
+      Nil{}
+    case M.ActivityLogged{+th, +id, +tone, +kind, _, _} <> t:
+      Tools.open.k(Bool.and(Bool.and(String.eq(th, thread), String.eq(tone, "tool")), Bool.not(String.contains(kind, "deploy_"))), thread, id, Tools.opens(t, thread))
+    case _ <> t:
+      Tools.opens(t, thread)
+
+def Tools.step(st: Step, +thread: String) -> Step:
+  match st:
+    case Step{+cs, os}:
+      Step{cs, List.append(&2, Out, os, Tools.opens(cs, thread))}
+
+def Tools.shut.k(go: Bool, +thread: String, +id: String, rest: List<&2, Out>) -> List<&2, Out>:
+  match go:
+    case True{}:
+      ToolShut{thread, id} <> rest
+    case False{}:
+      rest
+
+# Claude: every tool result of a line ends its call
+def Tools.shuts(bs: List<&2, J.Json>, +thread: String) -> List<&2, Out>:
+  match bs:
+    case Nil{}:
+      Nil{}
+    case +b <> t:
+      Tools.shut.k(String.eq(J.Json.get_str(b, "type", ""), "tool_result"), thread, J.Json.get_str(b, "tool_use_id", ""), Tools.shuts(t, thread))
+
+def Tools.kind(+t: String) -> Bool:
+  Bool.or(String.eq(t, "command_execution"), String.eq(t, "file_change"))
+
+# Codex-like lines (acp: Grok, Muse, Antigravity log the call when it starts
+# and end it at "tool.done"; Codex logs it when it completes)
+def Tools.line.k(i: Nat, acp: Bool, +thread: String, +id: String, +kind: Bool) -> List<&2, Out>:
+  match i:
+    case 1n:
+      Bool.pick(List<&2, Out>, Bool.and(kind, Bool.not(String.is_empty(id))), Bool.pick(List<&2, Out>, acp, [ToolOpen{thread, id}], [ToolShut{thread, id}]), Nil{})
+    case 5n:
+      Bool.pick(List<&2, Out>, Bool.and(kind, Bool.and(Bool.not(acp), Bool.not(String.is_empty(id)))), [ToolOpen{thread, id}], Nil{})
+    case 6n:
+      Bool.pick(List<&2, Out>, String.is_empty(id), Nil{}, [ToolShut{thread, id}])
+    case _:
+      Nil{}
+
+def Tools.line.id(i: Nat, +o: J.Json) -> String:
+  Bool.pick(String, Nat.is_eq(i, 6n), J.Json.get_str(o, "id", ""), J.Json.get_str(J.Json.get_obj(o, "item"), "id", ""))
+
+def Tools.line(+i: Nat, acp: Bool, +thread: String, +o: J.Json) -> List<&2, Out>:
+  Tools.line.k(i, acp, thread, Tools.line.id(i, o), Tools.kind(J.Json.get_str(J.Json.get_obj(o, "item"), "type", "")))
+
+def Tools.gone.k(go: Bool, +th: String, rest: List<&2, Out>) -> List<&2, Out>:
+  match go:
+    case True{}:
+      ToolsGone{th} <> rest
+    case False{}:
+      rest
+
+def Tools.ended(st: M.TurnState) -> Bool:
+  match st:
+    case M.Running{}:
+      False{}
+    case _:
+      True{}
+
+# the changes that end a thread's calls: a turn that is not running, an
+# archive, a delete
+def Tools.gone(cs: List<&2, M.Change>) -> List<&2, Out>:
+  match cs:
+    case Nil{}:
+      Nil{}
+    case M.TurnChanged{+th, st, _} <> t:
+      Tools.gone.k(Tools.ended(st), th, Tools.gone(t))
+    case M.ThreadArchived{+th, +b, _} <> t:
+      Tools.gone.k(b, th, Tools.gone(t))
+    case M.ThreadDeleted{+th, _} <> t:
+      ToolsGone{th} <> Tools.gone(t)
+    case _ <> t:
+      Tools.gone(t)
+
+# the step's outputs, with the calls of the threads it ended shut after them
+def Tools.outs(+cs: List<&2, M.Change>, +os: List<&2, Out>) -> List<&2, Out>:
+  List.append(&2, Out, os, Tools.gone(cs))
+
 # A subagent's own lines (parent_tool_use_id names the Agent call that
 # started it): what it writes and the tools it calls go to its log, not the
 # thread's timeline, and its partial text, tool results and usage are not
@@ -1544,11 +1832,12 @@ def Claude.line.k(i: Nat, +s: M.State, +thread: String, +now: Nat, +o: J.Json) -
     case 1n:
       Claude.stream.if(Hub.running(Hub.thread(s, thread)), thread, J.Json.get_obj(o, "event"))
     case 2n:
-      Claude.assistant.t(s, thread, now, J.Json.get_obj(o, "message"), J.Json.get_str(o, "uuid", ""))
+      Tools.step(Claude.assistant.t(s, thread, now, J.Json.get_obj(o, "message"), J.Json.get_str(o, "uuid", "")), thread)
     case 3n:
       Step.after(Claude.result.if(Hub.running(Hub.thread(s, thread)), thread, now, o), Usage.window(s, thread, now, o))
     case 4n:
-      Step.also(Claude.named(s, thread, now, o), Steps.claude(J.Json.elems(J.Json.get_obj(J.Json.get_obj(o, "message"), "content")), thread, Hub.cwd(s, Hub.thread(s, thread))))
+      Step.also(Step.also(Claude.named(s, thread, now, o), Steps.claude(J.Json.elems(J.Json.get_obj(J.Json.get_obj(o, "message"), "content")), thread, Hub.cwd(s, Hub.thread(s, thread)))),
+        Tools.shuts(J.Json.elems(J.Json.get_obj(J.Json.get_obj(o, "message"), "content")), thread))
     case _:
       Step.none()
 
@@ -1964,7 +2253,7 @@ def Switch.ctx(none: Bool, +th: String, +msg: String, +text: String, +now: Nat) 
 
 def Switch.go(+s: M.State, +now: Nat, +client: U32, +id: String, +th: String, +from: String, +to: String) -> Step:
   +seen = M.Switch.seen(s, th, to)
-  +missed = Nat.sub(M.Switch.count(Hub.entries(s), th), seen)
+  +missed = Nat.sub(M.Switch.count(s, th), seen)
   Step{List.concat(&2, M.Change, [Switch.old(M.Queue.items(s, th), th, now), [M.ProviderSet{th, to, "", now}],
       Switch.ctx(Nat.is_eq(missed, 0n), th, HD.Hand.prefix() ++ "switch:" ++ Nat.show(Hub.seq(s)), HD.Hand.switch(Hub.entries(s), th, from, to, seen), now),
       [M.ActivityLogged{th, Hub.id("p", now, Hub.seq(s)), "info", "provider", "Now on " ++ to ++ Bool.pick(String, Nat.is_eq(missed, 0n), "", "; it gets what it missed with the next message"), now}]]),
@@ -1997,8 +2286,14 @@ def Stop.outs(+provider: String, +thread: String, +rid: String) -> List<&2, Out>
 def Hub.resume(+s: M.State, +now: Nat, +client: U32, +id: String, +thread: String) -> Step:
   Step.before(Nil{}, [Reply.ok(client, id)], Wt.start(s, now, thread, False{}))
 
-# why: what the server learned of the exit (core/contain.bend's words for
-# an out-of-memory end); "" says the plain exit code
+# why an agent's process ended, in words: a SIGKILL (137) is most likely
+# the kernel taking it for memory; any other end says its plain exit code
+# ("" here). Backplane picks the thread back up either way.
+def Exit.why(+code: U32) -> String:
+  Bool.pick(String, U32.is_eq(code, 137), "agent was killed (signal 9, likely out of memory)", "")
+
+# why: what the server learned of the exit (Exit.why); "" says the plain
+# exit code
 def Hub.agent_gone.k(running: Bool, +thread: String, +now: Nat, +code: U32, +why: String) -> Step:
   match running:
     case True{}:
@@ -2255,12 +2550,25 @@ def Codex.line.parsed(m: Maybe<&2, J.Json>, +s: M.State, +thread: String, +now: 
     case None{}:
       Step.none()
 
-# a Codex or Grok line counts only while its thread's turn runs: what a
+# Grok's and Muse's tool calls are logged before they run: their design
+# steps come at "tool.done"
+def Hub.acp_like(+p: String) -> Bool:
+  Bool.or(Bool.or(String.eq(p, "grok"), String.eq(p, "muse")), String.eq(p, "antigravity"))
+
+# the open-call outs of a Codex-like line, after its step
+def Tools.codex(acp: Bool, m: Maybe<&2, J.Json>, st: Step, +thread: String) -> Step:
+  match m:
+    case Some{+o}:
+      Step.also(st, Tools.line(Codex.kind(J.Json.get_str(o, "type", "")), acp, thread, o))
+    case None{}:
+      st
+
+# a Codex, Grok or Muse line counts only while its thread's turn runs: what a
 # stopped turn's process still says is old news (law stopped_turn_quiet)
-def Hub.agent_line.c(run: Bool, +s: M.State, +now: Nat, +thread: String, line: String) -> Step:
+def Hub.agent_line.c(run: Bool, +s: M.State, +now: Nat, +thread: String, +line: String) -> Step:
   match run:
     case True{}:
-      Steps.after.if(Bool.not(String.eq(Hub.provider(Hub.thread(s, thread)), "grok")), Codex.line.parsed(J.Json.parse(line), s, thread, now), thread, Hub.cwd(s, Hub.thread(s, thread)))
+      Tools.codex(Hub.acp_like(Hub.provider(Hub.thread(s, thread))), J.Json.parse(line), Steps.after.if(Bool.not(Hub.acp_like(Hub.provider(Hub.thread(s, thread)))), Codex.line.parsed(J.Json.parse(line), s, thread, now), thread, Hub.cwd(s, Hub.thread(s, thread))), thread)
     case False{}:
       Step.none()
 
@@ -2405,14 +2713,19 @@ def Answer.demo(busy: Bool) -> M.State:
     M.MessagePosted{"t1", "m1", M.User{}, "[message from person@desk]\nhey", 2n}, M.MessagePosted{"t1", "m2", M.Assistant{}, "hi", 3n},
     M.TurnChanged{"t1", M.Completed{}, 3n}], Bool.pick(List<&2, M.Change>, busy, [M.WorkSet{"t1", "bg", "a\tx", 3n}], Nil{})), M.State.empty())
 
+# post: the state after the step; the policy's record (core/notice.bend)
+# is written with it
+def Ended.out.p(+post: M.State, +s: M.State, +now: Nat, +state: String, +thread: String, +cwd: String, +cs: List<&2, M.Change>, os: List<&2, Out>) -> Step:
+  Step{List.append(&2, M.Change, List.append(&2, M.Change, cs, Sum.at(RF.Sum.due(s, thread, now), thread, now)), NO.Policy.end(post, now, thread, state)),
+    List.append(&2, Out, os, TurnEnded{thread, state} <> Git{0, "", "step", thread, cwd, "", ""} <> Git{0, "", "checkpoint", thread, cwd, "", ""}
+      <> List.append(&2, Out, Sum.out(RF.Sum.due(s, thread, now), s, thread, "thread"), Answer.out(String.eq(state, "completed"), post, thread)))}
+
 def Ended.out.k(none: Bool, +s: M.State, +now: Nat, +state: String, +thread: String, +cwd: String, st: Step) -> Step:
   match none st:
     case True{} _:
       st
     case False{} Step{+cs, os}:
-      Step{List.append(&2, M.Change, cs, Sum.at(RF.Sum.due(s, thread, now), thread, now)),
-        List.append(&2, Out, os, TurnEnded{thread, state} <> Git{0, "", "step", thread, cwd, "", ""} <> Git{0, "", "checkpoint", thread, cwd, "", ""}
-          <> List.append(&2, Out, Sum.out(RF.Sum.due(s, thread, now), s, thread, "thread"), Answer.out(String.eq(state, "completed"), M.State.replay(cs, s), thread)))}
+      Ended.out.p(M.State.replay(cs, s), s, now, state, thread, cwd, cs, os)
 
 def Ended.out.s(+s: M.State, +now: Nat, +state: String, +thread: String, +cwd: String, st: Step) -> Step:
   Ended.out.k(String.is_empty(state), s, now, state, thread, cwd, st)
@@ -2644,6 +2957,298 @@ def Task.finish.w(+s: M.State, +now: Nat, +thread: String, st: Step) -> Step:
     case Step{+cs, os}:
       Task.finish.w.e(Task.ended.last(cs, thread), s, now, thread, cs, os)
 
+# Launched threads reporting back
+# -------------------------------
+# A thread started with thread_launch (model.bend's Launch) tells whoever
+# launched it, the way a delegated task's child does: when a step ends its
+# turn (completed, failed, interrupted) or opens an ask, a short note goes
+# to the launcher's thread through its inbox (Hub.inbox: a turn starts
+# there, or the note waits in its queue behind a running one; the queue is
+# in the log, so a restart keeps the order). One note per turn end at most
+# (law launch_once_per_end); none when the launcher turned reports off
+# (law launch_muted_quiet), when the turn left work out of hand (the turn
+# that finishes it reports; law launch_waits_for_work), or when the thread
+# already wrote to its launcher in this turn (law launch_said_quiet).
+# A launcher that goes back and forth with its thread Lr.loops() times
+# with no word from the person gets a last note and the reports stop
+# (law launch_loop_bounded). The uberbot's notes go to the machine that
+# holds its conversation (Ub.chat), and a launcher on another machine is
+# reached through the outbox below.
+
+# the most turns in a row a launcher's own messages start before reports stop
+def Lr.loops() -> Nat:
+  20n
+
+# how much of the last reply a note carries
+def Lr.cut() -> Nat:
+  1500n
+
+# 0: nothing, 1 completed, 2 failed, 3 interrupted (the thread's last turn change)
+def Lr.one(c: M.Change, +thread: String, acc: Nat) -> Nat:
+  match c:
+    case M.TurnChanged{+th, M.Completed{}, _}:
+      Bool.pick(Nat, String.eq(th, thread), 1n, acc)
+    case M.TurnChanged{+th, M.Failed{}, _}:
+      Bool.pick(Nat, String.eq(th, thread), 2n, acc)
+    case M.TurnChanged{+th, M.Interrupted{}, _}:
+      Bool.pick(Nat, String.eq(th, thread), 3n, acc)
+    case M.TurnChanged{+th, _, _}:
+      Bool.pick(Nat, String.eq(th, thread), 0n, acc)
+    case _:
+      acc
+
+def Lr.go(cs: List<&2, M.Change>, +thread: String, acc: Nat) -> Nat:
+  match cs:
+    case Nil{}:
+      acc
+    case c <> t:
+      Lr.go(t, thread, Lr.one(c, thread, acc))
+
+def Lr.ended(cs: List<&2, M.Change>, +thread: String) -> Nat:
+  Lr.go(cs, thread, 0n)
+
+def Lr.ask.k(hit: Bool, +kind: String, +tool: String, +detail: String, +rest: String) -> String:
+  match hit:
+    case True{}:
+      Bool.pick(String, String.is_empty(tool), kind, kind ++ " (" ++ tool ++ ")") ++ Bool.pick(String, String.is_empty(detail), "", ": " ++ String.take(detail, 600n))
+    case False{}:
+      rest
+
+# the first ask the step opened in the thread ("" for none)
+def Lr.ask(cs: List<&2, M.Change>, +thread: String) -> String:
+  match cs:
+    case Nil{}:
+      ""
+    case M.AskOpened{_, +th, +k, +tool, +d, _, _} <> t:
+      Lr.ask.k(String.eq(th, thread), k, tool, d, Lr.ask(t, thread))
+    case _ <> t:
+      Lr.ask(t, thread)
+
+# a report's message id: "t:<thread>:lr-<key>"
+def Lr.msg(+from: String, +key: String) -> String:
+  M.Link.id(from, "lr-" ++ key)
+
+def Lr.is(+id: String) -> Bool:
+  String.contains(id, ":lr-")
+
+def Lr.sent(+i: String, +t: String, +th: String, +to: String) -> Bool:
+  Bool.and(String.eq(t, to), Bool.and(String.eq(M.Link.from(i), th), Bool.not(Lr.is(i))))
+
+def Lr.said.go(es: List<&2, M.Entry>, +th: String, +to: String, done: Bool, acc: Bool) -> Bool:
+  match es done:
+    case _ True{}:
+      acc
+    case Nil{} False{}:
+      acc
+    case M.Msg{+i, +t, M.User{}, _, _} <> rest False{}:
+      Lr.said.go(rest, th, to, Bool.or(String.eq(t, th), Lr.sent(i, t, th, to)), Lr.sent(i, t, th, to))
+    case M.Msg{+i, +t, _, _, _} <> rest False{}:
+      Lr.said.go(rest, th, to, Lr.sent(i, t, th, to), Lr.sent(i, t, th, to))
+    case _ <> rest False{}:
+      Lr.said.go(rest, th, to, False{}, acc)
+
+# whether the thread wrote to `to` since its newest user message (its own
+# entries, newest first, hold what it sent; reports are not its words)
+def Lr.said(es: List<&2, M.Entry>, +th: String, +to: String) -> Bool:
+  Lr.said.go(es, th, to, False{}, False{})
+
+def Lr.trig.go(es: List<&2, M.Entry>, +th: String, done: Bool, +acc: String) -> String:
+  match es done:
+    case _ True{}:
+      acc
+    case Nil{} False{}:
+      acc
+    case M.Msg{+i, +t, M.User{}, _, _} <> rest False{}:
+      Lr.trig.go(rest, th, String.eq(t, th), Bool.pick(String, String.eq(t, th), i, acc))
+    case _ <> rest False{}:
+      Lr.trig.go(rest, th, False{}, acc)
+
+# the id of the thread's newest user message (what started its turn)
+def Lr.trig(es: List<&2, M.Entry>, +th: String) -> String:
+  Lr.trig.go(es, th, False{}, "")
+
+def Lr.reply(a: Answer) -> String:
+  match a:
+    case Answer{r, _}:
+      r
+
+def Lr.title(t: M.Thread) -> String:
+  match t:
+    case M.Thread{_, _, ti, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _}:
+      ti
+
+def Lr.word(+e: Nat, +reply: String) -> String:
+  match e:
+    case 1n:
+      Bool.pick(String, String.ends_with(String.trim(reply), "?"), "finished its turn and waits for an answer", "completed")
+    case 2n:
+      "failed"
+    case _:
+      "was interrupted"
+
+def Lr.body(long: Bool, +reply: String, +id: String) -> String:
+  match long:
+    case True{}:
+      String.take(reply, Lr.cut()) ++ "…\n\n(cut short: thread_read " ++ id ++ " for the rest)"
+    case False{}:
+      reply
+
+def Lr.head(+id: String, +title: String) -> String:
+  "[Backplane] Launched thread \"" ++ title ++ "\" (" ++ id ++ ")"
+
+# the note for a turn's end: the state and the last reply, cut to Lr.cut()
+def Lr.note(+id: String, +title: String, +word: String, +reply: String) -> String:
+  Lr.head(id, title) ++ " " ++ word ++ Bool.pick(String, String.is_empty(String.trim(reply)), ".", ":\n\n" ++ Lr.body(Nat.is_gt(String.length(reply), Lr.cut()), reply, id))
+
+# the note for an ask: the thread waits on the person
+def Lr.ask.note(+id: String, +title: String, +ask: String) -> String:
+  Lr.head(id, title) ++ " needs the person: " ++ ask ++ "\nIt waits until they answer in that thread."
+
+# the last note before the reports stop
+def Lr.loop.note(+id: String) -> String:
+  "\n\nReports from this thread stop here: it went back and forth with you " ++ Nat.show(Lr.loops()) ++ " times with no word from the person. thread_update {threadId: " ++ id ++ ", report: true} starts them again."
+
+def Lr.n.key(+th: String) -> String:
+  "launch.n." ++ th
+
+# Where a report goes
+# -------------------
+
+# thread_send between threads a launch ties, whatever their projects (a
+# bot's thread has none): a launched thread to its launcher and back, and
+# any thread to the uberbot's own thread (here or a replica's elsewhere;
+# law launch_send_launcher)
+def Lr.may(+s: M.State, +from: String, +to: String) -> Bool:
+  Bool.and(Bool.not(String.is_empty(to)),
+    Bool.or(Bool.or(String.eq(M.Launch.by(s, from), to), String.eq(M.Launch.by(s, to), from)), UBS.Ub.chat.is(s, to)))
+
+# the uberbot's thread here or a replica's elsewhere: the thread that holds
+# its conversation now; anything else is itself
+def Lr.dest(+s: M.State, +by: String) -> String:
+  Bool.pick(String, UBS.Ub.chat.is(s, by), Bool.pick(String, String.is_empty(UBS.Ub.chat(s)), by, UBS.Ub.chat(s)), by)
+
+# The outbox for launchers on other machines: the setting launch.far, one
+# report a line ("key\tto\tfrom\ttext as JSON"), oldest first. The server
+# sends them in order (LaunchFar), each to its machine as launch_report
+# (fmcp.bend), drops a line once its machine took it (Lr.far.sent), and
+# tries the rest again each minute; the receiver keeps one message per key
+# (law launch_far_once), so a line sent twice posts once.
+def Lr.far.key() -> String:
+  "launch.far"
+
+def Lr.far.line(+key: String, +to: String, +from: String, +text: String) -> String:
+  key ++ "\t" ++ to ++ "\t" ++ from ++ "\t" ++ J.Json.show(J.Str{text})
+
+def Lr.far.add(+s: M.State, +line: String, +now: Nat) -> M.Change:
+  M.SettingSet{Lr.far.key(), Bool.pick(String, String.is_empty(M.Setting.get(s, Lr.far.key(), "")), line, M.Setting.get(s, Lr.far.key(), "") ++ "\n" ++ line), now}
+
+def Lr.far.keep.k(drop: Bool, +l: String, rest: List<&2, String>) -> List<&2, String>:
+  match drop:
+    case True{}:
+      rest
+    case False{}:
+      l <> rest
+
+def Lr.far.keep(ls: List<&2, String>, +key: String) -> List<&2, String>:
+  match ls:
+    case Nil{}:
+      Nil{}
+    case +l <> t:
+      Lr.far.keep.k(String.starts_with(l, key ++ "\t"), l, Lr.far.keep(t, key))
+
+def Lr.far.lines(+s: M.State) -> List<&2, String>:
+  M.Launch.lines(M.Setting.get(s, Lr.far.key(), ""))
+
+# the outbox once `key` was taken
+def Lr.far.sent(+s: M.State, +now: Nat, +key: String) -> Step:
+  Step{[M.SettingSet{Lr.far.key(), String.join(Lr.far.keep(Lr.far.lines(s), key), "\n"), now}], Nil{}}
+
+# each minute: the outbox is sent again while anything is in it
+def Lr.far.tick.k(none: Bool) -> Step:
+  match none:
+    case True{}:
+      Step.none()
+    case False{}:
+      Step.outs([LaunchFar{}])
+
+def Lr.far.tick(+s: M.State) -> Step:
+  Lr.far.tick.k(String.is_empty(M.Setting.get(s, Lr.far.key(), "")))
+
+# Delivering
+# ----------
+
+def Lr.exists(+s: M.State, +th: String) -> Bool:
+  String.eq(M.Thread.id(Hub.thread(s, th)), th)
+
+def Lr.send.here(ok: Bool, +s: M.State, +now: Nat, +thread: String, +to: String, +text: String) -> Step:
+  match ok:
+    case True{}:
+      Hub.inbox.id(s, now, thread, to, M.User{}, text, Lr.msg(thread, Hub.id("r", now, Hub.seq(s))))
+    case False{}:
+      Step.none()
+
+def Lr.send.k(far: Bool, +s: M.State, +now: Nat, +thread: String, +to: String, +text: String) -> Step:
+  match far:
+    case True{}:
+      Step{[Lr.far.add(s, Lr.far.line(Hub.id("r", now, Hub.seq(s)), to, thread, text), now)], [LaunchFar{}]}
+    case False{}:
+      Lr.send.here(Lr.exists(s, to), s, now, thread, to, text)
+
+# a note from thread to its launcher's thread `to`
+def Lr.send(+s: M.State, +now: Nat, +thread: String, +to: String, +text: String) -> Step:
+  Lr.send.k(FR.Fr.is(to), s, now, thread, to, text)
+
+# a turn's end: the counter of launcher-started turns moves on, and at
+# the bound the reports stop
+# the counter, written only when it moves
+def Lr.n.set(same: Bool, +thread: String, +n: Nat, +now: Nat) -> List<&2, M.Change>:
+  match same:
+    case True{}:
+      Nil{}
+    case False{}:
+      [M.SettingSet{Lr.n.key(thread), Nat.show(n), now}]
+
+def Lr.end.n(stop: Bool, +s: M.State, +now: Nat, +thread: String, +by: String, +to: String, +n: Nat, +text: String) -> Step:
+  match stop:
+    case True{}:
+      Step.before([M.SettingSet{Lr.n.key(thread), "0", now}, M.ThreadLaunched{thread, by, False{}, now}], Nil{}, Lr.send(s, now, thread, to, text ++ Lr.loop.note(thread)))
+    case False{}:
+      Step.before(Lr.n.set(Nat.is_eq(n, M.Switch.num(M.Setting.get(s, Lr.n.key(thread), "0"), 0n)), thread, n, now), Nil{}, Lr.send(s, now, thread, to, text))
+
+def Lr.end.c(own: Bool, +s: M.State, +now: Nat, +thread: String, +by: String, +to: String, +e: Nat) -> Step:
+  +n = {Bool.pick(Nat, own, Nat.add(M.Switch.num(M.Setting.get(s, Lr.n.key(thread), "0"), 0n), 1n), 0n) : Nat}
+  +reply = {Lr.reply(Answer.of(M.State.mine(s, thread), thread)) : String}
+  Lr.end.n(Nat.is_ge(n, Lr.loops()), s, now, thread, by, to, n, Lr.note(thread, Lr.title(Hub.thread(s, thread)), Lr.word(e, reply), reply))
+
+def Lr.end.k(quiet: Bool, +s: M.State, +now: Nat, +thread: String, +by: String, +to: String, +e: Nat) -> Step:
+  match quiet:
+    case True{}:
+      Step.none()
+    case False{}:
+      Lr.end.c(Bool.and(String.eq(M.Link.from(Lr.trig(M.State.mine(s, thread), thread)), by), Bool.not(String.is_empty(by))), s, now, thread, by, to, e)
+
+# what the step tells the launcher (s: the state after the step)
+def Lr.what.e(none: Bool, +e: Nat, +s: M.State, +now: Nat, +thread: String, +by: String, +to: String) -> Step:
+  match none:
+    case True{}:
+      Step.none()
+    case False{}:
+      Lr.end.k(Bool.or(Bool.and(Nat.is_eq(e, 1n), Nat.is_gt(M.Work.busy(s, thread), 0n)), Bool.and(Bool.not(FR.Fr.is(to)), Lr.said(M.State.mine(s, thread), thread, to))), s, now, thread, by, to, e)
+
+def Lr.what(asked: Bool, +ask: String, +e: Nat, +s: M.State, +now: Nat, +thread: String, +by: String, +to: String) -> Step:
+  match asked:
+    case True{}:
+      Lr.send(s, now, thread, to, Lr.ask.note(thread, Lr.title(Hub.thread(s, thread)), ask))
+    case False{}:
+      Lr.what.e(Nat.is_eq(e, 0n), e, s, now, thread, by, to)
+
+def Lr.tell.q(quiet: Bool, +to: String, +ask: String, +e: Nat, +s1: M.State, +now: Nat, +thread: String) -> Step:
+  match quiet:
+    case True{}:
+      Step.none()
+    case False{}:
+      Lr.what(Bool.not(String.is_empty(ask)), ask, e, s1, now, thread, M.Launch.by(s1, thread), to)
+
 def Task.by.id.k(r: Map<&2, M.Task> & M.Task) -> M.Task:
   (_, t) = r
   t
@@ -2713,20 +3318,237 @@ def Retire.answers(as: List<&2, M.Ask>, +th: String) -> List<&2, Out>:
     case +a <> t:
       Retire.answer(Retire.hit(a, th), Retire.id(a), Retire.answers(t, th))
 
+def Step.cat(a: Step, b: Step) -> Step:
+  match a b:
+    case Step{cs, os} Step{c2, o2}:
+      Step{List.append(&2, M.Change, cs, c2), List.append(&2, Out, os, o2)}
+
+# (a launcher that stopped the thread itself is not told it was stopped)
+def Lr.tell.to(+to: String, +ask: String, +e: Nat, +s1: M.State, +now: Nat, +thread: String, +from: String, +cs: List<&2, M.Change>, os: List<&2, Out>) -> Step:
+  Step.cat(Step{cs, os}, Lr.tell.q(Bool.or(String.eq(to, thread), Bool.and(Bool.not(String.is_empty(from)), String.eq(from, M.Launch.by(s1, thread)))), to, ask, e, s1, now, thread))
+
+def Lr.tell.go(none: Bool, +ask: String, +e: Nat, +s: M.State, +now: Nat, +thread: String, +from: String, +cs: List<&2, M.Change>, os: List<&2, Out>) -> Step:
+  match none:
+    case True{}:
+      Step{cs, os}
+    case False{}:
+      Lr.tell.to(Lr.dest(s, M.Launch.by(s, thread)), ask, e, M.State.replay(cs, s), now, thread, from, cs, os)
+
+def Lr.tell.k(on: Bool, +s: M.State, +now: Nat, +thread: String, +from: String, +cs: List<&2, M.Change>, os: List<&2, Out>) -> Step:
+  match on:
+    case False{}:
+      Step{cs, os}
+    case True{}:
+      Lr.tell.go(Bool.and(String.is_empty(Lr.ask(cs, thread)), Nat.is_eq(Lr.ended(cs, thread), 0n)), Lr.ask(cs, thread), Lr.ended(cs, thread), s, now, thread, from, cs, os)
+
+# a step about a thread, with its report to the launcher after it (from:
+# the thread whose call made the step, "" for an agent's own line or the
+# person)
+# harness-coord: wakes. A matching step sends one message through Lr.send.
+def Wake.fire.k(fresh: Bool, +s: M.State, +now: Nat, +id: String, +key: String, +events: List<&2, String>, +text: String) -> Step:
+  match fresh:
+    case False{}:
+      Step.none()
+    case True{}:
+      +o = WK.Wake.get(s, id)
+      Step.before(WK.Wake.mark(id, key, J.Json.get_bool(o, "once", True{}), now), Nil{}, Lr.send(s, now, Bool.pick(String, String.eq(J.Json.get_str(o, "kind", ""), "thread"), J.Json.get_str(o, "target", ""), J.Json.get_str(o, "by", "")), J.Json.get_str(o, "by", ""), WK.Wake.note(o, text, events)))
+
+def Wake.thread.end.key(cs: List<&2, M.Change>, +th: String) -> String:
+  match cs:
+    case Nil{}:
+      ""
+    case M.TurnChanged{+t, +state, +at} <> rest:
+      Bool.pick(String, Bool.and(String.eq(t, th), Nat.is_gt(Lr.one(M.TurnChanged{t, state, at}, th, 0n), 0n)), t ++ ":" ++ Nat.show(at) ++ ":" ++ Nat.show(Lr.one(M.TurnChanged{t, state, at}, th, 0n)), Wake.thread.end.key(rest, th))
+    case _ <> rest:
+      Wake.thread.end.key(rest, th)
+
+def Wake.thread.ask.key(cs: List<&2, M.Change>, +th: String) -> String:
+  match cs:
+    case Nil{}:
+      ""
+    case M.AskOpened{+id, +t, _, _, _, _, at} <> rest:
+      Bool.pick(String, String.eq(t, th), t ++ ":ask:" ++ id ++ ":" ++ Nat.show(at), Wake.thread.ask.key(rest, th))
+    case _ <> rest:
+      Wake.thread.ask.key(rest, th)
+
+def Wake.ended(cs: List<&2, M.Change>, +th: String) -> Nat:
+  match cs:
+    case Nil{}:
+      0n
+    case +c <> t:
+      Bool.pick(Nat, Nat.is_gt(Lr.one(c, th, 0n), 0n), Lr.one(c, th, 0n), Wake.ended(t, th))
+
+def Wake.thread.events(+s: M.State, +th: String, +cs: List<&2, M.Change>) -> List<&2, String>:
+  +end = Wake.ended(cs, th)
+  List.concat(&2, String, [Bool.pick(List<&2, String>, Nat.is_gt(end, 0n), ["end"], Nil{}),
+    Bool.pick(List<&2, String>, Nat.is_eq(end, 1n), ["done"], Nil{}),
+    Bool.pick(List<&2, String>, Nat.is_eq(end, 2n), ["fail"], Nil{}),
+    Bool.pick(List<&2, String>, Bool.not(String.is_empty(Wake.thread.ask.key(cs, th))), ["ask"], Nil{}),
+    Bool.pick(List<&2, String>, Bool.and(Nat.is_gt(end, 0n), Bool.and(Nat.is_eq(M.Work.busy(s, th), 0n), Bool.and(Bool.not(M.Queue.waiting(s, th)), Bool.not(Hub.running(Hub.thread(s, th)))))), ["idle"], Nil{})])
+
+def Wake.thread.text(+s: M.State, +th: String, +cs: List<&2, M.Change>) -> String:
+  "thread \"" ++ Lr.title(Hub.thread(s, th)) ++ "\" (" ++ th ++ ") " ++
+    Bool.pick(String, Nat.is_gt(Wake.ended(cs, th), 0n), "ended its turn (" ++ Lr.word(Wake.ended(cs, th), "") ++ "). Its last reply: " ++ String.take(Lr.reply(Answer.of(M.State.mine(s, th), th)), Lr.cut()), "opened an ask: " ++ Lr.ask(cs, th))
+
+def Wake.poll.k(empty: Bool, prs: List<&2, String>, files: List<&2, String>) -> Step:
+  match empty:
+    case True{}:
+      Step.none()
+    case False{}:
+      Step.outs([WakePoll{prs, files}])
+
+def Wake.poll(+s: M.State) -> Step:
+  +prs = WK.Wake.targets(M.Wake.ids(s, "wakes.poll"), s, "pr", Nil{})
+  +files = WK.Wake.targets(M.Wake.ids(s, "wakes.poll"), s, "file", Nil{})
+  Wake.poll.k(Bool.and(Nat.is_eq(List.length(&2, String, prs), 0n), Nat.is_eq(List.length(&2, String, files), 0n)), prs, files)
+
+# The first stat is the subscription's baseline; exists may fire immediately.
+def Wake.file.events(+base: String, +stamp: String) -> List<&2, String>:
+  List.concat(&2, String, [Bool.pick(List<&2, String>, String.eq(stamp, "missing"), Nil{}, ["exists"]),
+    Bool.pick(List<&2, String>, Bool.and(Bool.not(String.is_empty(base)), Bool.not(String.eq(base, stamp))), ["changed"], Nil{})])
+
+# Drops accompany every deletion, including scratch expiry and bot deletion.
+def Wake.deleted.go(cs: List<&2, M.Change>, +s: M.State, +now: Nat) -> List<&2, M.Change>:
+  match cs:
+    case Nil{}:
+      Nil{}
+    case M.ThreadDeleted{th, at} <> t:
+      List.append(&2, M.Change, WK.Wake.drop(WK.Wake.by(s, th), at), Wake.deleted.go(t, s, now))
+    case _ <> t:
+      Wake.deleted.go(t, s, now)
+
+def Wake.deleted(+s: M.State, st: Step) -> Step:
+  match st:
+    case Step{+cs, os}:
+      Step{List.append(&2, M.Change, cs, Wake.deleted.go(cs, s, 0n)), os}
+
+# an archived or deleted thread is told nothing
+def Lost.live(t: M.Thread) -> Bool:
+  match t:
+    case M.Thread{_, _, _, _, _, _, _, ar, _, _, _, _, _, _, _, _, _, _, _, _, de}:
+      Bool.not(Bool.or(ar, de))
+
+def Wake.fire(+s: M.State, +now: Nat, +id: String, +key: String, +actual: List<&2, String>, +text: String) -> Step:
+  +events = WK.Wake.select(WK.Wake.events(WK.Wake.get(s, id)), actual)
+  Wake.fire.k(Bool.and(WK.Wake.fresh(s, id, key, events), Bool.and(Hub.owns(s, J.Json.get_str(WK.Wake.get(s, id), "by", "")), Lost.live(Hub.thread(s, J.Json.get_str(WK.Wake.get(s, id), "by", ""))))), s, now, id, key, events, text)
+
+# State moves between subscriptions so several waking the same thread queue safely.
+def Wake.deliver(ids: List<&2, String>, +s: M.State, +now: Nat, +key: String, +events: List<&2, String>, +text: String, +st: Step) -> Step:
+  match ids:
+    case Nil{}:
+      st
+    case id <> t:
+      Wake.deliver(t, s, now, key, events, text, Step.cat(st, Wake.fire(M.State.replay(Queue.changes(st), s), now, id, key, events, text)))
+
+def Wake.thread.fire(+s: M.State, +now: Nat, +id: String, +signals: List<&2, WK.WakeSignal>, +text: String) -> Step:
+  +matches = WK.Wake.signal.unseen(signals, s, id, WK.Wake.events(WK.Wake.get(s, id)))
+  +events = WK.Wake.signal.events(matches)
+  +st = Wake.fire.k(Bool.and(Nat.is_gt(List.length(&2, String, events), 0n), Bool.and(Hub.owns(s, J.Json.get_str(WK.Wake.get(s, id), "by", "")), Lost.live(Hub.thread(s, J.Json.get_str(WK.Wake.get(s, id), "by", ""))))), s, now, id, String.join(WK.Wake.signal.keys(matches), "|"), events, text)
+  Step.before(Bool.pick(List<&2, M.Change>, Nat.is_gt(List.length(&2, M.Change, Queue.changes(st)), 0n), WK.Wake.signal.mark(matches, id, now), Nil{}), Nil{}, st)
+
+def Wake.thread.deliver(ids: List<&2, String>, +s: M.State, +now: Nat, +signals: List<&2, WK.WakeSignal>, +text: String, +st: Step) -> Step:
+  match ids:
+    case Nil{}:
+      st
+    case id <> t:
+      Wake.thread.deliver(t, s, now, signals, text, Step.cat(st, Wake.thread.fire(M.State.replay(Queue.changes(st), s), now, id, signals, text)))
+
+def Wake.thread.after.changed(hit: Bool, +s: M.State, +now: Nat, +th: String, +cs: List<&2, M.Change>, os: List<&2, Out>) -> Step:
+  match hit:
+    case False{}:
+      Step{cs, os}
+    case True{}:
+      +s1 = M.State.replay(cs, s)
+      Wake.thread.deliver(WK.Wake.on(s1, "thread", th), s, now, WK.Wake.signals(Wake.thread.events(s1, th, cs), Wake.thread.end.key(cs, th), Wake.thread.ask.key(cs, th)), Wake.thread.text(s1, th, cs), Step{cs, os})
+
+def Wake.thread.after.st(+s: M.State, +now: Nat, +th: String, st: Step) -> Step:
+  match st:
+    case Step{+cs, os}:
+      Wake.thread.after.changed(Bool.or(Nat.is_gt(Wake.ended(cs, th), 0n), Bool.not(String.is_empty(Wake.thread.ask.key(cs, th)))), s, now, th, cs, os)
+
+def Wake.thread.after.k(ids: List<&2, String>, +s: M.State, +now: Nat, +th: String, st: Step) -> Step:
+  match ids:
+    case Nil{}:
+      st
+    case _ <> _:
+      Wake.thread.after.st(s, now, th, st)
+
+def Wake.thread.after(+s: M.State, +now: Nat, +th: String, st: Step) -> Step:
+  Wake.thread.after.k(WK.Wake.on(s, "thread", th), s, now, th, st)
+
+def Wake.pr.fire(+s: M.State, +now: Nat, +id: String, +target: String, +p: WK.PrSeen) -> Step:
+  +events = WK.Wake.pr.unseen(WK.Wake.select(WK.Wake.events(WK.Wake.get(s, id)), WK.Wake.pr.events(p)), s, id, p)
+  +st = Wake.fire.k(Bool.and(Nat.is_gt(List.length(&2, String, events), 0n), Bool.and(Hub.owns(s, J.Json.get_str(WK.Wake.get(s, id), "by", "")), Lost.live(Hub.thread(s, J.Json.get_str(WK.Wake.get(s, id), "by", ""))))), s, now, id, target ++ ":" ++ WK.Wake.pr.key(p), events, WK.Wake.pr.text(target, p))
+  Step.before(Bool.pick(List<&2, M.Change>, Nat.is_gt(List.length(&2, M.Change, Queue.changes(st)), 0n), WK.Wake.pr.mark(events, id, p, now), Nil{}), Nil{}, st)
+
+def Wake.pr.go(ids: List<&2, String>, +s: M.State, +now: Nat, +target: String, +p: WK.PrSeen, +st: Step) -> Step:
+  match ids:
+    case Nil{}:
+      st
+    case id <> t:
+      Wake.pr.go(t, s, now, target, p, Step.cat(st, Wake.pr.fire(M.State.replay(Queue.changes(st), s), now, id, target, p)))
+
+def Wake.pr(+s: M.State, +now: Nat, +target: String, +p: WK.PrSeen) -> Step:
+  Wake.pr.go(WK.Wake.on(s, "pr", target), s, now, target, p, Step.none())
+
+def Wake.file.one(+s: M.State, +now: Nat, +id: String, +target: String, +stamp: String) -> Step:
+  +base = M.Setting.get(s, "wake.base." ++ id, "")
+  Step.before(Bool.pick(List<&2, M.Change>, String.is_empty(base), [M.SettingSet{"wake.base." ++ id, stamp, now}], Nil{}), Nil{}, Wake.fire(s, now, id, target ++ ":" ++ stamp, Wake.file.events(base, stamp), "file " ++ target ++ " (" ++ stamp ++ ")"))
+
+def Wake.file.go(ids: List<&2, String>, +s: M.State, +now: Nat, +target: String, +stamp: String, +st: Step) -> Step:
+  match ids:
+    case Nil{}:
+      st
+    case id <> t:
+      Wake.file.go(t, s, now, target, stamp, Step.cat(st, Wake.file.one(M.State.replay(Queue.changes(st), s), now, id, target, stamp)))
+
+def Wake.file(+s: M.State, +now: Nat, +target: String, +stamp: String) -> Step:
+  Wake.file.go(WK.Wake.on(s, "file", target), s, now, target, stamp, Step.none())
+
+def Wake.after.go(cs: List<&2, M.Change>, +s: M.State, +st: Step) -> Step:
+  match cs:
+    case Nil{}:
+      st
+    case M.TurnChanged{th, _, at} <> t:
+      Wake.after.go(t, s, Wake.thread.after(s, at, th, st))
+    case M.AskOpened{_, th, _, _, _, _, at} <> t:
+      Wake.after.go(t, s, Wake.thread.after(s, at, th, st))
+    case _ <> t:
+      Wake.after.go(t, s, st)
+
+def Wake.after(+s: M.State, +st: Step) -> Step:
+  Wake.deleted(s, Wake.after.go(Queue.changes(st), s, st))
+
+def Launch.tell.from(+s: M.State, +now: Nat, +thread: String, +from: String, st: Step) -> Step:
+  match st:
+    case Step{+cs, os}:
+      Wake.thread.after(s, now, thread, Lr.tell.k(M.Launch.reports(s, thread), s, now, thread, from, cs, os))
+
+def Launch.tell(+s: M.State, +now: Nat, +thread: String, st: Step) -> Step:
+  Launch.tell.from(s, now, thread, "", st)
+
 # a turn still running ends as interrupted, and its task with it; the
 # server is told, so a phone's Live Activity drops it (law
 # retire_stop_tells)
-def Retire.turn(run: Bool, +s: M.State, +now: Nat, +th: String, st: Step) -> Step:
+# (a launched thread's launcher hears of it, unless it stopped it itself:
+# from, the thread whose call stopped it)
+def Retire.turn.f(run: Bool, +s: M.State, +now: Nat, +th: String, +from: String, st: Step) -> Step:
   match run:
     case True{}:
-      Task.finish(s, now, th, Step.before([M.TurnChanged{th, M.Interrupted{}, now}], [TurnEnded{th, "stopped"}], st))
+      Launch.tell.from(s, now, th, from, Task.finish(s, now, th, Step.before([M.TurnChanged{th, M.Interrupted{}, now}], [TurnEnded{th, "stopped"}], st)))
     case False{}:
       st
 
+def Retire.turn(run: Bool, +s: M.State, +now: Nat, +th: String, st: Step) -> Step:
+  Retire.turn.f(run, s, now, th, "", st)
+
 # Stop: the running turn is interrupted (Stop.outs), its asks close
-def Retire.stop(+s: M.State, +now: Nat, +th: String, os: List<&2, Out>) -> Step:
-  Retire.turn(True{}, s, now, th, Step{Retire.asks(M.Asks.all(s), th, now),
+def Retire.stop.f(+s: M.State, +now: Nat, +th: String, +from: String, os: List<&2, Out>) -> Step:
+  Retire.turn.f(True{}, s, now, th, from, Step{Retire.asks(M.Asks.all(s), th, now),
     List.append(&2, Out, os, List.append(&2, Out, Stop.outs(Hub.provider(Hub.thread(s, th)), th, Hub.id("i", now, Hub.seq(s))), Retire.answers(M.Asks.all(s), th)))})
+
+def Retire.stop(+s: M.State, +now: Nat, +th: String, os: List<&2, Out>) -> Step:
+  Retire.stop.f(s, now, th, "", os)
 
 def Hub.interrupt.k(run: Bool, +s: M.State, +now: Nat, +client: U32, +id: String, +thread: String) -> Step:
   match run:
@@ -2744,17 +3566,6 @@ def Retire.archive(+s: M.State, +now: Nat, +th: String, base: Step) -> Step:
   Retire.turn(Hub.running(Hub.thread(s, th)), s, now, th,
     Step.also(Step.after(base, List.append(&2, M.Change, Retire.asks(M.Asks.all(s), th, now), Bg.clear(s, th, now))), Retire.answers(M.Asks.all(s), th)))
 
-def Step.cat(a: Step, b: Step) -> Step:
-  match a b:
-    case Step{cs, os} Step{c2, o2}:
-      Step{List.append(&2, M.Change, cs, c2), List.append(&2, Out, os, o2)}
-
-# an archived or deleted thread is told nothing
-def Lost.live(t: M.Thread) -> Bool:
-  match t:
-    case M.Thread{_, _, _, _, _, _, _, ar, _, _, _, _, _, _, _, _, _, _, _, _, de}:
-      Bool.not(Bool.or(ar, de))
-
 # the note itself: to an idle thread it starts a turn; behind a running
 # turn or a held queue it waits
 def Lost.note(held: Bool, +s: M.State, +now: Nat, +th: String, +text: String) -> Step:
@@ -2768,8 +3579,8 @@ def Lost.note(held: Bool, +s: M.State, +now: Nat, +th: String, +text: String) ->
 # ------------
 # Work outside an agent's own task list (a long build, a job on another
 # machine, a process already running) is the hub's to watch: work_run
-# launches a command so it survives the hub, work_watch follows a systemd
-# unit, a pid or a file, and when it ends the thread is told the outcome
+# launches a command, work_watch follows a pid or a file (a restart of the
+# hub that cuts a run off reads as lost, and the thread picks it back up), and when it ends the thread is told the outcome
 # (it wakes, or the note waits behind its turn). Rows are WorkSet kind
 # "watch" (setting watch.<thread>), written before anything is launched;
 # the row's removal makes the telling happen once. An outcome that cannot
@@ -2899,9 +3710,30 @@ def Watch.end.k(found: Bool, timeout: Bool, +l: String, +s: M.State, +now: Nat, 
 # watched work ended (status: "exit <code>", "gone", "timeout", or the
 # file's "found"): told once, from the row that is still there; a timeout
 # keeps it, ended with outcome unknown (laws watch_end_*, watch_timeout_*)
+# A timeout reports uncertainty, but cannot free a lock over live work.
+def Locks.work.has.go(names: List<&2, String>, +s: M.State, +id: String) -> Bool:
+  match names:
+    case Nil{}:
+      False{}
+    case name <> t:
+      Bool.or(LK.Lock.has(M.Locks.get(s, name), id), Locks.work.has.go(t, s, id))
+
+def Locks.work.has(+s: M.State, +id: String) -> Bool:
+  Locks.work.has.go(M.Locks.names(s), s, id)
+
+def Watch.end.locked(timeout: Bool, +s: M.State, +now: Nat, +th: String, +id: String, +status: String, +detail: String) -> Step:
+  match timeout:
+    case True{}:
+      Step.cat(Step{[Watch.put(th, now, Watch.set(M.Work.watch(s, th), id, "watching (timed out, still running)"))], Nil{}}, Watch.tell(s, now, th, Watch.text(M.Bg.title(Watch.find(M.Work.watch(s, th), id)), "timed out, still running, lock retained", detail)))
+    case False{}:
+      Watch.end.k(Bool.and(Bool.not(String.is_empty(Watch.find(M.Work.watch(s, th), id))), Bool.not(M.Bg.ended(Watch.find(M.Work.watch(s, th), id)))), String.eq(status, "timeout"), Watch.find(M.Work.watch(s, th), id), s, now, th, id, status, detail)
+
+def Watch.end.raw(+s: M.State, +now: Nat, +th: String, +id: String, +status: String, +detail: String) -> Step:
+  Watch.end.locked(Bool.and(String.eq(status, "timeout"), Locks.work.has(s, id)), s, now, th, id, status, detail)
+
 def Watch.end(+s: M.State, +now: Nat, +th: String, +id: String, +status: String, +detail: String) -> Step:
-  Watch.end.k(Bool.and(Bool.not(String.is_empty(Watch.find(M.Work.watch(s, th), id))), Bool.not(M.Bg.ended(Watch.find(M.Work.watch(s, th), id)))),
-    String.eq(status, "timeout"), Watch.find(M.Work.watch(s, th), id), s, now, th, id, status, detail)
+  +st = Watch.end.raw(s, now, th, id, status, detail)
+  Wake.deliver(WK.Wake.on(s, "work", id), s, now, id ++ ":" ++ Nat.show(now) ++ ":" ++ status, Bool.pick(List<&2, String>, Nat.is_gt(List.length(&2, M.Change, Queue.changes(st)), 0n), ["end"], Nil{}), "work " ++ id ++ " ended: " ++ status ++ ". " ++ detail, st)
 
 def Watch.cancel.k(live: Bool, +l: String, +s: M.State, +now: Nat, +th: String, +id: String) -> Step:
   match live:
@@ -2913,9 +3745,19 @@ def Watch.cancel.k(live: Bool, +l: String, +s: M.State, +now: Nat, +th: String, 
 # owned work stopped: the row says "cancelling" until its watcher
 # confirms the end (then "cancelled") or that it cannot know (law
 # watch_cancel_keeps_until_confirmed)
-def Watch.cancel(+s: M.State, +now: Nat, +th: String, +id: String) -> Step:
+def Watch.cancel.raw(+s: M.State, +now: Nat, +th: String, +id: String) -> Step:
   Watch.cancel.k(Bool.and(Bool.not(String.is_empty(Watch.find(M.Work.watch(s, th), id))), Bool.not(M.Bg.ended(Watch.find(M.Work.watch(s, th), id)))),
     Watch.find(M.Work.watch(s, th), id), s, now, th, id)
+
+def Watch.cancel.queued(waiting: Bool, +s: M.State, +now: Nat, +th: String, +id: String) -> Step:
+  match waiting:
+    case True{}:
+      Step.cat(Step{[Watch.put(th, now, M.Bg.drop(M.Work.watch(s, th), id))], Nil{}}, Watch.tell(s, now, th, Watch.text(M.Bg.title(Watch.find(M.Work.watch(s, th), id)), "cancelled", "")))
+    case False{}:
+      Watch.cancel.raw(s, now, th, id)
+
+def Watch.cancel(+s: M.State, +now: Nat, +th: String, +id: String) -> Step:
+  Watch.cancel.queued(String.starts_with(Watch.state(Watch.find(M.Work.watch(s, th), id)), "waiting for lock"), s, now, th, id)
 
 # no longer watched: it may still run, and its watcher stops (law
 # watch_unwatch_says_may_run)
@@ -2952,7 +3794,7 @@ def Watch.rearm.rows(ls: List<&2, String>, +th: String, +cwd: String) -> List<&2
     case Nil{}:
       Nil{}
     case +l <> t:
-      Watch.rearm.one(M.Bg.ended(l), l, th, cwd, Watch.rearm.rows(t, th, cwd))
+      Watch.rearm.one(Bool.or(M.Bg.ended(l), String.starts_with(Watch.state(l), "waiting for lock")), l, th, cwd, Watch.rearm.rows(t, th, cwd))
 
 def Watch.rearm.go(ts: List<&2, M.Thread>, +s: M.State) -> List<&2, Out>:
   match ts:
@@ -3065,6 +3907,356 @@ def Update.held.w(waiting: Bool, +s: M.State, +now: Nat) -> Step:
 def Update.held(+s: M.State, +now: Nat) -> Step:
   Update.held.w(Bool.not(String.is_empty(M.Setting.get(s, "update.restart", ""))), s, now)
 
+# Deploying
+# ---------
+# A deploy (core/deploy.bend) waits for no tool call in flight and the
+# build locks free, then the hub swaps the staged package in and restarts
+# into it; the turns it cuts resume (Carry). deploy.wait is the waiting
+# request, deploy.done what the next start reads once (laws deploy_*).
+
+def Deploy.probe() -> List<&2, Out>:
+  [DeployProbe{}]
+
+# a note to the requester thread (none for the person: by is empty)
+def Deploy.tell(+s: M.State, +now: Nat, +by: String, +text: String) -> Step:
+  Bool.pick(Step, String.is_empty(by), Step.none(), Lr.send(s, now, "deploy", by, text))
+
+def Deploy.stage.ok(+stage: String) -> Bool:
+  Bool.or(String.is_empty(stage), String.starts_with(stage, "/"))
+
+def Deploy.ask(+s: M.State, +now: Nat, +by: String, +note: String, +stage: String) -> Step:
+  Step{[M.SettingSet{"deploy.wait", DP.Deploy.line(by, note, stage, VER.Version.current(), now, False{}, False{}, ""), now}], Deploy.probe()}
+
+def Deploy.restart(ok: Bool, +s: M.State, +now: Nat, +client: U32, +id: String, +stage: String, +note: String) -> Step:
+  match ok:
+    case True{}:
+      Step.before(Nil{}, [Reply.ok(client, id)], Deploy.ask(s, now, "", note, stage))
+    case False{}:
+      Step.outs([Reply.err(client, id, "stage must be an absolute path")])
+
+def Deploy.cancel(+s: M.State, +now: Nat) -> Step:
+  Step{[M.SettingSet{"deploy.wait", "", now}], Nil{}}
+
+# the go: deploy.done is written (with the threads this cuts) before the
+# Out, and the wait cleared, in one step
+def Deploy.go(+line: String, +s: M.State, +now: Nat) -> Step:
+  Step{[M.SettingSet{"deploy.done", DP.Deploy.line(DP.Deploy.by(line), DP.Deploy.note(line), DP.Deploy.stage(line), DP.Deploy.from(line),
+      DP.Deploy.since(line), DP.Deploy.noted(line), DP.Deploy.locked(line), DP.Deploy.running(s)), now}, M.SettingSet{"deploy.wait", "", now}],
+    [DeployGo{DP.Deploy.stage(line)}]}
+
+def Deploy.lock.set(same: Bool, free: Bool, +line: String, +open: String, +now: Nat) -> Step:
+  match same:
+    case True{}:
+      Step.none()
+    case False{}:
+      Step{[M.SettingSet{"deploy.wait", DP.Deploy.with(line, DP.Deploy.noted(line), Bool.not(free), open), now}], Nil{}}
+
+def Deploy.check.k(go: Bool, +free: Bool, +line: String, +open: String, +s: M.State, +now: Nat) -> Step:
+  match go:
+    case True{}:
+      Deploy.go(line, s, now)
+    case False{}:
+      Deploy.lock.set(Bool.and(Bool.pick(Bool, free, Bool.not(DP.Deploy.locked(line)), DP.Deploy.locked(line)), String.eq(DP.Deploy.open(line), open)), free, line, open, now)
+
+def Deploy.check.w(waiting: Bool, +clear: Bool, +free: Bool, +open: String, +s: M.State, +now: Nat) -> Step:
+  match waiting:
+    case True{}:
+      Deploy.check.k(Bool.and(clear, free), free, DP.Deploy.wait(s), open, s, now)
+    case False{}:
+      Step.none()
+
+# the build locks were looked at (free: both are): goes when no tool call is
+# open (the hub's in-memory list) and they are free, else remembers whether
+# a lock holds it and what is open, for the plane and deploy_status
+def Deploy.check(+s: M.State, +now: Nat, free: Bool, +open: List<&2, String>) -> Step:
+  Deploy.check.w(DP.Deploy.waiting(s), Nat.is_eq(DP.Open.count(open), 0n), free, DP.Open.threads(open), s, now)
+
+def Deploy.slow.k(due: Bool, +line: String, +s: M.State, +now: Nat) -> Step:
+  match due:
+    case True{}:
+      Step.cat(Step{[M.SettingSet{"deploy.wait", DP.Deploy.with(line, True{}, DP.Deploy.locked(line), DP.Deploy.open(line)), now}], Nil{}},
+        Deploy.tell(s, now, DP.Deploy.by(line), DP.Deploy.slow.text(DP.Deploy.count(line), DP.Deploy.locked(line))))
+    case False{}:
+      Step.none()
+
+def Deploy.tick.w(waiting: Bool, +s: M.State, +now: Nat) -> Step:
+  match waiting:
+    case True{}:
+      Step.cat(Deploy.slow.k(Bool.and(Bool.not(DP.Deploy.noted(DP.Deploy.wait(s))), Nat.is_ge(now, Nat.add(DP.Deploy.since(DP.Deploy.wait(s)), DP.Deploy.slow()))), DP.Deploy.wait(s), s, now),
+        Step.outs(Deploy.probe()))
+    case False{}:
+      Step.none()
+
+# the tick's look at a waiting deploy
+def Deploy.tick(+s: M.State, +now: Nat) -> Step:
+  Deploy.tick.w(DP.Deploy.waiting(s), s, now)
+
+def Deploy.after.w(go: Bool, +line: String, +s: M.State, +now: Nat) -> Step:
+  match go:
+    case True{}:
+      Step.cat(Step{[M.SettingSet{"deploy.done", "", now}], Nil{}},
+        Bool.pick(Step, DP.Deploy.in(line, DP.Deploy.by(line)), Step.none(), Deploy.tell(s, now, DP.Deploy.by(line), DP.Deploy.after.text(line, VER.Version.current()))))
+    case False{}:
+      Step.none()
+
+# at start: a deploy that restarted the hub is told once to its requester
+# (the threads it cut got the words with their continue message), and
+# deploy.done is cleared
+def Deploy.after(+s: M.State, +now: Nat) -> Step:
+  Deploy.after.w(Bool.not(String.is_empty(DP.Deploy.done(s))), DP.Deploy.done(s), s, now)
+
+# the swap failed: nothing restarted
+def Deploy.failed(+s: M.State, +now: Nat, +err: String) -> Step:
+  Step.cat(Step{[M.SettingSet{"deploy.done", "", now}], Nil{}},
+    Deploy.tell(s, now, DP.Deploy.by(DP.Deploy.done(s)), "[Backplane] Your deploy could not be installed (" ++ err ++ "). Nothing was restarted."))
+
+# demos for the laws and tests (t0 asks; t1 runs, inside a tool call or not)
+def Deploy.demo.line(+by: String) -> String:
+  DP.Deploy.line(by, "dev.sh", "", "0.9.0", 5n, False{}, False{}, "t1")
+
+def Deploy.demo.changes(tool: Bool, +key: String, +line: String) -> List<&2, M.Change>:
+  List.concat(&2, M.Change, [[M.ProjectCreated{"p1", "p", "/p", 1n}, M.ThreadCreated{"t0", "p1", "boss", M.Local{}, "", "", "claude", "", 1n},
+    M.ThreadCreated{"t1", "p1", "work", M.Local{}, "", "", "claude", "", 1n}, M.TurnChanged{"t1", M.Running{}, 3n}],
+    Bool.pick(List<&2, M.Change>, tool, [M.ActivityLogged{"t1", "a1", "tool", "Bash", "make", 4n}], Nil{}),
+    Bool.pick(List<&2, M.Change>, String.is_empty(line), Nil{}, [M.SettingSet{key, line, 5n}])])
+
+# tool: t1's newest entry is a tool call (the log shows nothing of whether
+# it is open: that is the hub's list, Deploy.demo.open); the line is deploy.wait
+def Deploy.demo(tool: Bool, +line: String) -> M.State:
+  M.State.replay(Deploy.demo.changes(tool, "deploy.wait", line), M.State.empty())
+
+# the hub's open calls: t1 is inside one, or between two
+def Deploy.demo.open(open: Bool) -> List<&2, String>:
+  Bool.pick(List<&2, String>, open, DP.Open.add(Nil{}, "t1", "a1"), Nil{})
+
+# the state at a start after a deploy by `by` (deploy.done set)
+def Deploy.demo.done(+by: String) -> M.State:
+  M.State.replay(Deploy.demo.changes(False{}, "deploy.done", Deploy.demo.line(by)), M.State.empty())
+
+def Deploy.demo.gos(os: List<&2, Out>) -> Nat:
+  match os:
+    case Nil{}:
+      0n
+    case DeployGo{_} <> t:
+      1n+Deploy.demo.gos(t)
+    case _ <> t:
+      Deploy.demo.gos(t)
+
+def Deploy.demo.go(st: Step) -> Nat:
+  match st:
+    case Step{_, os}:
+      Deploy.demo.gos(os)
+
+# the settings a step sets to nothing (key), and to something
+def Deploy.demo.sets(cs: List<&2, M.Change>, +key: String, +empty: Bool) -> Nat:
+  match cs:
+    case Nil{}:
+      0n
+    case M.SettingSet{+k, +v, _} <> t:
+      Nat.add(Bool.pick(Nat, Bool.and(String.eq(k, key), Bool.pick(Bool, empty, String.is_empty(v), Bool.not(String.is_empty(v)))), 1n, 0n), Deploy.demo.sets(t, key, empty))
+    case _ <> t:
+      Deploy.demo.sets(t, key, empty)
+
+def Deploy.demo.cs(st: Step) -> List<&2, M.Change>:
+  match st:
+    case Step{cs, _}:
+      cs
+
+# messages a step posts
+def Deploy.demo.posts(cs: List<&2, M.Change>) -> Nat:
+  match cs:
+    case Nil{}:
+      0n
+    case M.MessagePosted{_, _, _, _, _} <> t:
+      1n+Deploy.demo.posts(t)
+    case _ <> t:
+      Deploy.demo.posts(t)
+
+def Deploy.demo.notes(st: Step) -> Nat:
+  Deploy.demo.posts(Deploy.demo.cs(st))
+
+# the step again over the state it made
+def Deploy.demo.again(+s: M.State, st: Step) -> M.State:
+  M.State.replay(Deploy.demo.cs(st), s)
+
+# a bot (its thread "tb", no project) asked
+def Deploy.demo.bot() -> M.State:
+  M.State.replay([M.ProjectCreated{"p1", "p", "/p", 1n}, M.ThreadCreated{"tb", "", "Bub", M.Local{}, "", "", "claude", "", 1n}, M.BotSet{"b1", "Bub", "tb", 0n, "", 1n},
+    M.SettingSet{"deploy.done", Deploy.demo.line("tb"), 5n}], M.State.empty())
+
+# Open tool calls, for the laws: the outs of a Claude line on a running thread
+def Tools.demo.os(st: Step) -> List<&2, Out>:
+  match st:
+    case Step{_, os}:
+      os
+
+def Tools.demo.outs(+line: String) -> List<&2, Out>:
+  Tools.demo.os(Claude.line.parsed(J.Json.parse(line), Deploy.demo(False{}, ""), "t1", 9n))
+
+def Tools.demo.use() -> String:
+  "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Bash\",\"input\":{\"command\":\"make\"}}]}}"
+
+def Tools.demo.result() -> String:
+  "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"ok\"}]}}"
+
+# how many opens (shut: False) or shuts (True) of a call
+def Tools.demo.count(os: List<&2, Out>, +shut: Bool, +call: String) -> Nat:
+  match os:
+    case Nil{}:
+      0n
+    case ToolOpen{_, +c} <> t:
+      Nat.add(Bool.pick(Nat, Bool.and(Bool.not(shut), String.eq(c, call)), 1n, 0n), Tools.demo.count(t, shut, call))
+    case ToolShut{_, +c} <> t:
+      Nat.add(Bool.pick(Nat, Bool.and(shut, String.eq(c, call)), 1n, 0n), Tools.demo.count(t, shut, call))
+    case _ <> t:
+      Tools.demo.count(t, shut, call)
+
+# the tool_use line opens its call once and shuts nothing; its tool_result
+# line shuts the same call once and opens nothing: 0 + 0 + 10 + 1 = 11
+def Tools.demo.pair() -> Nat:
+  Nat.add(Nat.add(Nat.mul(1000n, Tools.demo.count(Tools.demo.outs(Tools.demo.use()), True{}, "toolu_1")), Nat.mul(100n, Tools.demo.count(Tools.demo.outs(Tools.demo.result()), False{}, "toolu_1"))),
+    Nat.add(Nat.mul(10n, Tools.demo.count(Tools.demo.outs(Tools.demo.use()), False{}, "toolu_1")), Tools.demo.count(Tools.demo.outs(Tools.demo.result()), True{}, "toolu_1")))
+
+# a turn's end: the ToolsGone outs of one thread
+def Tools.demo.ends() -> Nat:
+  List.length(&2, Out, Tools.outs([M.TurnChanged{"t1", M.Completed{}, 5n}], Nil{}))
+
+# harness-coord: locks. Grants and work launches share the log write boundary.
+def Locks.answer(+l: LK.NamedLock, +id: String) -> J.Json:
+  J.Json.obj([J.KV{"held", J.Flag{Bool.and(String.eq(LK.Lock.owner(l), id), LK.Lock.ready(l))}}, J.KV{"position", J.Num{Nat.show(LK.Lock.position(l, id))}}, J.KV{"holder", J.Str{LK.Lock.owner(l)}}])
+
+def Locks.list.go(names: List<&2, String>, +s: M.State) -> List<&2, J.Json>:
+  match names:
+    case Nil{}:
+      Nil{}
+    case +name <> t:
+      J.Json.obj([J.KV{"name", J.Str{name}}, J.KV{"holder", LK.Lock.holder.json(LK.Lock.holder(M.Locks.get(s, name)))}, J.KV{"waiters", J.Json.arr(LK.Lock.parties.json(LK.Lock.waiters(M.Locks.get(s, name))))}, J.KV{"ready", J.Flag{LK.Lock.ready(M.Locks.get(s, name))}}]) <> Locks.list.go(t, s)
+
+def Locks.put(+s: M.State, +now: Nat, +name: String, +l: LK.NamedLock) -> Step:
+  Step{[M.LockChanged{name, l, now}], Nil{}}
+
+def Locks.acquire(+s: M.State, +now: Nat, +name: String, +party: LK.LockParty, +ready: Bool) -> Step:
+  Bool.pick(Step, LK.Lock.has(M.Locks.get(s, name), LK.Lock.id(party)), Step.none(), Locks.put(s, now, name, LK.Lock.acquire(M.Locks.get(s, name), party, ready)))
+
+def Locks.release.k(own: Bool, +s: M.State, +now: Nat, +name: String, +id: String) -> Step:
+  match own:
+    case True{}:
+      Locks.put(s, now, name, LK.Lock.release(M.Locks.get(s, name), id))
+    case False{}:
+      Step.none()
+
+def Locks.release(+s: M.State, +now: Nat, +name: String, +id: String) -> Step:
+  Locks.release.k(String.eq(LK.Lock.owner(M.Locks.get(s, name)), id), s, now, name, id)
+
+def Locks.cancel(+s: M.State, +now: Nat, +name: String, +id: String) -> Step:
+  Locks.put(s, now, name, LK.Lock.cancel(M.Locks.get(s, name), id))
+
+def Locks.work.start(+s: M.State, +now: Nat, +th: String, +a: J.Json, +ready: Bool) -> Step:
+  +name = J.Json.get_str(a, "lock", "")
+  +id = Watch.id(s, th)
+  +party = {LK.LockParty{id, "work", th, J.Json.get_str(a, "note", J.Json.get_str(a, "command", "")), now, 0n} : LK.LockParty}
+  +l = LK.Lock.acquire(M.Locks.get(s, name), party, ready)
+  +held = Bool.and(String.eq(LK.Lock.owner(l), id), LK.Lock.ready(l))
+  Step{[M.LockChanged{name, l, now}, Watch.put(th, now, List.append(&2, String, M.Work.watch(s, th), [Watch.line(id, Bool.pick(String, held, "launching", LK.Lock.wait.word(name, LK.Lock.position(l, id))), "" ++ LK.Lock.note(party), "run", J.Json.get_str(a, "command", ""), "-", Watch.deadline.of(now, M.Switch.num(J.Json.as_raw(J.Json.get(a, "timeoutSec"), "0"), 0n)))]))],
+    Bool.pick(List<&2, Out>, held, [Await{th, id, "run", J.Json.get_str(a, "command", ""), "-", Watch.deadline.of(now, M.Switch.num(J.Json.as_raw(J.Json.get(a, "timeoutSec"), "0"), 0n)), Hub.cwd(s, Hub.thread(s, th))}], Nil{})}
+
+def Locks.work.grant(+s: M.State, +now: Nat, +p: LK.LockParty) -> Step:
+  +th = LK.Lock.thread(p)
+  +id = LK.Lock.id(p)
+  +l = Watch.find(M.Work.watch(s, th), id)
+  Step{[Watch.put(th, now, Watch.set(M.Work.watch(s, th), id, "launching"))], [Await{th, id, Watch.kind(l), Watch.target(l), Watch.ident(l), Watch.deadline(l), Hub.cwd(s, Hub.thread(s, th))}]}
+
+def Locks.grant.kind(kind: String, +s: M.State, +now: Nat, +name: String, +p: LK.LockParty) -> Step:
+  match kind:
+    case "thread":
+      Lr.send(s, now, "lock:" ++ name, LK.Lock.thread(p), "Lock " ++ name ++ " is yours (waited " ++ M.Time.ago(now, LK.Lock.since(p)) ++ "). Release it with lock_release when done.")
+    case "work":
+      Locks.work.grant(s, now, p)
+    case _:
+      Step.none()
+
+def Locks.grant(needed: Bool, h: Maybe<&2, LK.LockParty>, +s: M.State, +now: Nat, +name: String) -> Step:
+  match needed h:
+    case True{} Some{+p}:
+      Locks.grant.kind(LK.Lock.kind(p), s, now, name, p)
+    case _ _:
+      Step.none()
+
+def Locks.ready.k(ok: Bool, +s: M.State, +now: Nat, +name: String) -> Step:
+  match ok:
+    case True{}:
+      Locks.put(s, now, name, LK.Lock.mark(M.Locks.get(s, name)))
+    case False{}:
+      Step.none()
+
+def Locks.ready(+s: M.State, +now: Nat, +name: String, +id: String) -> Step:
+  Locks.ready.k(Bool.and(String.eq(LK.Lock.owner(M.Locks.get(s, name)), id), Bool.not(LK.Lock.ready(M.Locks.get(s, name)))), s, now, name)
+
+def Locks.live(+s: M.State, +now: Nat, +p: LK.LockParty) -> Bool:
+  Bool.pick(Bool, String.eq(LK.Lock.kind(p), "client"), Nat.is_gt(LK.Lock.lease(p), now),
+    Bool.and(Hub.owns(s, LK.Lock.thread(p)), Bool.and(Lost.live(Hub.thread(s, LK.Lock.thread(p))),
+      Bool.pick(Bool, String.eq(LK.Lock.kind(p), "work"), Bool.and(Bool.not(String.is_empty(Watch.find(M.Work.watch(s, LK.Lock.thread(p)), LK.Lock.id(p)))), Bool.not(M.Bg.ended(Watch.find(M.Work.watch(s, LK.Lock.thread(p)), LK.Lock.id(p))))), True{}))))
+
+def Locks.prune.q(q: List<&2, LK.LockParty>, +s: M.State, +now: Nat) -> List<&2, LK.LockParty>:
+  match q:
+    case Nil{}:
+      Nil{}
+    case +p <> t:
+      List.append(&2, LK.LockParty, Bool.pick(List<&2, LK.LockParty>, Locks.live(s, now, p), [p], Nil{}), Locks.prune.q(t, s, now))
+
+def Locks.prune.h(h: Maybe<&2, LK.LockParty>, +q: List<&2, LK.LockParty>, +r: Bool, +s: M.State, +now: Nat) -> LK.NamedLock:
+  match h:
+    case None{}:
+      LK.Lock.promote(q)
+    case Some{+p}:
+      Bool.pick(LK.NamedLock, Locks.live(s, now, p), LK.NamedLock{Some{p}, q, r}, LK.Lock.expire(LK.NamedLock{Some{p}, q, r}, LK.Lock.id(p)))
+
+def Locks.prune(l: LK.NamedLock, +s: M.State, +now: Nat) -> LK.NamedLock:
+  match l:
+    case LK.NamedLock{h, q, r}:
+      Locks.prune.h(h, Locks.prune.q(q, s, now), r, s, now)
+
+def Locks.wait.work(same: Bool, +s: M.State, +now: Nat, +th: String, +id: String, +word: String) -> Step:
+  match same:
+    case True{}:
+      Step.none()
+    case False{}:
+      Step{[Watch.put(th, now, Watch.set(M.Work.watch(s, th), id, word))], Nil{}}
+
+def Locks.wait.party(work: Bool, +p: LK.LockParty, +s: M.State, +now: Nat, +name: String, +n: Nat) -> Step:
+  match work:
+    case True{}:
+      +word = LK.Lock.wait.word(name, n)
+      Locks.wait.work(String.eq(Watch.state(Watch.find(M.Work.watch(s, LK.Lock.thread(p)), LK.Lock.id(p))), word), s, now, LK.Lock.thread(p), LK.Lock.id(p), word)
+    case False{}:
+      Step.none()
+
+def Locks.wait.go(q: List<&2, LK.LockParty>, +s: M.State, +now: Nat, +name: String, +n: Nat, +st: Step) -> Step:
+  match q:
+    case Nil{}:
+      st
+    case +p <> t:
+      Locks.wait.go(t, s, now, name, 1n+n, Step.cat(st, Locks.wait.party(String.eq(LK.Lock.kind(p), "work"), p, M.State.replay(Queue.changes(st), s), now, name, n)))
+
+def Locks.after.one(+before: M.State, +s: M.State, +now: Nat, +name: String) -> Step:
+  +old = M.Locks.get(before, name)
+  +current = M.Locks.get(s, name)
+  +l = Locks.prune(current, s, now)
+  +changed = Bool.not(String.eq(LK.Lock.owner(old), LK.Lock.owner(l)))
+  +cs = Bool.pick(List<&2, M.Change>, String.eq(J.Json.show(LK.Lock.json(current)), J.Json.show(LK.Lock.json(l))), Nil{}, [M.LockChanged{name, l, now}])
+  +s1 = M.State.replay(cs, s)
+  Step.cat(Step.cat(Step{cs, Bool.pick(List<&2, Out>, changed, [LockGuard{name, LK.Lock.owner(old), LK.Lock.owner(l)}], Nil{})}, Locks.wait.go(LK.Lock.waiters(l), s1, now, name, 1n, Step.none())),
+    Locks.grant(Bool.and(LK.Lock.ready(l), Bool.and(Bool.not(changed), Bool.not(LK.Lock.ready(old)))), LK.Lock.holder(l), s1, now, name))
+
+def Locks.after.go(names: List<&2, String>, +before: M.State, +now: Nat, +st: Step) -> Step:
+  match names:
+    case Nil{}:
+      st
+    case name <> t:
+      Locks.after.go(t, before, now, Step.cat(st, Locks.after.one(before, M.State.replay(Queue.changes(st), before), now, name)))
+
+def Locks.after(+s: M.State, +now: Nat, +st: Step) -> Step:
+  Locks.after.go(M.Locks.names(M.State.replay(Queue.changes(st), s)), s, now, st)
 
 def Hub.request.k(i: Nat, +s: M.State, +now: Nat, +client: U32, +id: String, +p: J.Json, +m: String) -> Step:
   match i:
@@ -3136,8 +4328,20 @@ def Hub.request.k(i: Nat, +s: M.State, +now: Nat, +client: U32, +id: String, +p:
     # the person stops watched work or a delegated task from its row
     case 31n:
       Step.before(Nil{}, [Reply.ok(client, id)], Watch.cancel(s, now, J.Json.get_str(p, "thread", ""), J.Json.get_str(p, "id", "")))
+    case 37n:
+      Step.before(Nil{}, [Reply.ok(client, id)], Locks.release(s, now, J.Json.get_str(p, "name", ""), J.Json.get_str(p, "thread", "")))
+    case 38n:
+      Step.before(Nil{}, [Reply.ok(client, id)], Locks.cancel(s, now, J.Json.get_str(p, "name", ""), J.Json.get_str(p, "thread", "")))
+    case 33n:
+      Step.reply(client, id, Bool.pick(List<&2, M.Change>, String.eq(J.Json.get_str(WK.Wake.get(s, J.Json.get_str(p, "id", "")), "by", ""), J.Json.get_str(p, "thread", "")), [M.WakeDropped{J.Json.get_str(p, "id", ""), now}], Nil{}))
     case 32n:
       Step.before(Nil{}, [Reply.ok(client, id)], Task.cancel.user(Maybe.default(&2, M.Task, Task.of_child(s, J.Json.get_str(p, "child", "")), M.Task.blank("")), s, now))
+    case 34n:
+      Deploy.restart(Deploy.stage.ok(J.Json.get_str(p, "stage", "")), s, now, client, id, J.Json.get_str(p, "stage", ""), J.Json.get_str(p, "note", ""))
+    case 35n:
+      Step.before(Nil{}, [Reply.ok(client, id)], Deploy.cancel(s, now))
+    case 36n:
+      Step.outs([Reply.data(client, id, DP.Deploy.status(s))])
     case _:
       Hub.more(C.Codec.pos(Hub.methods.git(), m), s, now, client, id, p, m)
 
@@ -3158,7 +4362,7 @@ def Hub.request_text(+s: M.State, +now: Nat, +client: U32, text: String) -> Step
 
 # one line of an agent's stdout
 def Hub.agent_line(+s: M.State, +now: Nat, +thread: String, line: String) -> Step:
-  Task.finish.w(s, now, thread, Queue.drain(s, now, thread, Ended.out(s, now, thread, Hub.agent_line.k(Bool.not(String.eq(Hub.provider(Hub.thread(s, thread)), "claude")), s, now, thread, line))))
+  Launch.tell(s, now, thread, Task.finish.w(s, now, thread, Queue.drain(s, now, thread, Ended.out(s, now, thread, Hub.agent_line.k(Bool.not(String.eq(Hub.provider(Hub.thread(s, thread)), "claude")), s, now, thread, line)))))
 
 # Claude's lines by the command ledger (core/cmds.bend)
 # ------------------------------------------------------
@@ -3237,7 +4441,7 @@ def Claude.line.v.k(v: Nat, +s: M.State, +thread: String, +now: Nat, +o: J.Json,
       Claude.line.o(False{}, s, thread, now, o)
 
 def Hub.agent_line.v.k(v: Nat, +s: M.State, +now: Nat, +thread: String, +o: J.Json, +text: String) -> Step:
-  Task.finish.w(s, now, thread, Queue.drain(s, now, thread, Ended.out(s, now, thread, Claude.line.v.k(v, s, thread, now, o, text))))
+  Launch.tell(s, now, thread, Task.finish.w(s, now, thread, Queue.drain(s, now, thread, Ended.out(s, now, thread, Claude.line.v.k(v, s, thread, now, o, text)))))
 
 # one line of an agent's stdout with its verdict (o: the line parsed;
 # text: an ending's outcome, CM.Cmds.text)
@@ -3298,34 +4502,72 @@ def Lost.unknown(ls: List<&2, String>) -> List<&2, String>:
     case +l <> t:
       (M.Bg.line(M.Bg.field(l, 0n), M.Bg.ended.mark() ++ "unknown") ++ M.Bg.rest(l)) <> Lost.unknown(t)
 
+# Work lost at a restart is put aside, out of the thread's rows, until the
+# agent is told (laws lostwork_*): the phones' island counts a thread's rows
+# (M.Work.busy), and work whose owner died is nobody's to wait on. The
+# stash holds the rows as Bg.show writes them.
+def Lost.key(+th: String) -> String:
+  "lostbg." ++ th
+
+def Lost.stash(+s: M.State, +th: String) -> List<&2, String>:
+  M.Bg.lines(M.Setting.get(s, Lost.key(th), ""))
+
+# the work to tell: what was put aside, and any rows filed since
+def Lost.of(+s: M.State, +th: String) -> List<&2, String>:
+  List.append(&2, String, Lost.stash(s, th), M.Bg.of(s, th))
+
+# the rows put aside, and the stash emptied (nothing for a thread with none)
+def Lost.aside(+s: M.State, +now: Nat, +th: String) -> List<&2, M.Change>:
+  Bool.pick(List<&2, M.Change>, List.is_empty(&2, String, Lost.of(s, th)), Nil{},
+    [M.SettingSet{Lost.key(th), M.Bg.show(Lost.of(s, th)), now}, M.WorkSet{th, "bg", "", now}])
+
+def Lost.unstash(+s: M.State, +now: Nat, +th: String) -> List<&2, M.Change>:
+  Bool.pick(List<&2, M.Change>, List.is_empty(&2, String, Lost.stash(s, th)), Nil{}, [M.SettingSet{Lost.key(th), "", now}])
+
 def Bg.lost.k(has: Bool, on: Bool, +s: M.State, +now: Nat, +th: String, +why: String, +ls: List<&2, String>) -> Step:
   match has on:
     case False{} _:
       Step.none()
     case True{} True{}:
-      Step.cat(Lost.note(M.Queue.waiting(s, th), s, now, th, Lost.text(ls, why)), Step{[M.WorkSet{th, "bg", "", now}], Nil{}})
+      Step.cat(Lost.note(M.Queue.waiting(s, th), s, now, th, Lost.text(ls, why)), Step{List.append(&2, M.Change, [M.WorkSet{th, "bg", "", now}], Lost.unstash(s, now, th)), Nil{}})
     case True{} False{}:
-      Step{[M.ActivityLogged{th, Hub.id("l", now, Hub.seq(s)), "info", "lost", Lost.text(ls, why), now}, M.WorkSet{th, "bg", M.Bg.show(Lost.unknown(ls)), now}], Nil{}}
+      Step{List.append(&2, M.Change, [M.ActivityLogged{th, Hub.id("l", now, Hub.seq(s)), "info", "lost", Lost.text(ls, why), now}, M.WorkSet{th, "bg", M.Bg.show(Lost.unknown(M.Bg.of(s, th))), now}], Lost.unstash(s, now, th)), Nil{}}
 
 # a thread's background work lost (why: "restart", "exit", "replaced"):
 # told once; nothing for a thread with none new, or archived or deleted
 def Bg.lost(+s: M.State, +now: Nat, +th: String, +why: String) -> Step:
-  Bg.lost.k(Bool.and(Lost.new(M.Bg.of(s, th)), Lost.live(Hub.thread(s, th))), M.Carry.on(s), s, now, th, why, M.Bg.of(s, th))
+  Bg.lost.k(Bool.and(Lost.new(Lost.of(s, th)), Lost.live(Hub.thread(s, th))), M.Carry.on(s), s, now, th, why, Lost.of(s, th))
 
-def Bg.gone(live: Bool, +s: M.State, +now: Nat, +th: String) -> Step:
+# the agent's process is gone, and with it every row it filed: told (a live
+# thread), then none left, whatever restart.continue says (law
+# lostwork_exit_clears)
+def Bg.gone.k(live: Bool, +s: M.State, +now: Nat, +th: String) -> Step:
   match live:
     case True{}:
       Bg.lost(s, now, th, "exit")
     case False{}:
-      Step{Bg.clear(s, th, now), Nil{}}
+      Step.none()
+
+def Bg.gone(live: Bool, +s: M.State, +now: Nat, +th: String) -> Step:
+  Step.cat(Bg.gone.k(live, s, now, th), Step{Bg.clear(s, th, now), Nil{}})
 
 # an agent process ended; a turn still running ends with it, and the
 # background work it owned is told lost (behind the failed turn's queue
 # when one ran: law gone_idle_told)
+def Wake.exit.k(needed: Bool, +s: M.State, +now: Nat, +thread: String, +code: U32, +st: Step) -> Step:
+  match needed:
+    case True{}:
+      Wake.deliver(WK.Wake.on(s, "thread", thread), s, now, thread ++ ":exit:" ++ Nat.show(now) ++ ":" ++ U32.show(code), ["fail"], "thread \"" ++ Lr.title(Hub.thread(s, thread)) ++ "\" (" ++ thread ++ ") agent exited with code " ++ U32.show(code), st)
+    case False{}:
+      st
+
+def Wake.exit(+s: M.State, +now: Nat, +thread: String, +code: U32, +st: Step) -> Step:
+  Wake.exit.k(Bool.and(Bool.not(U32.is_eq(code, 0)), Bool.and(Bool.not(String.eq(C.Turn.name(M.Thread.turn(Hub.thread(s, thread))), "failed")), Nat.is_eq(Wake.ended(Queue.changes(st), thread), 0n))), s, now, thread, code, st)
+
 def Hub.agent_gone.why(+s: M.State, +now: Nat, +thread: String, +code: U32, +why: String) -> Step:
-  Step.before(Nil{}, Retire.answers(M.Asks.all(s), thread),
-    Step.cat(Step.after(Task.finish(s, now, thread, Queue.drain(s, now, thread, Ended.out(s, now, thread, Hub.agent_gone.k(Hub.running(Hub.thread(s, thread)), thread, now, code, why)))),
-      Retire.asks(M.Asks.all(s), thread, now)), Bg.gone(Lost.live(Hub.thread(s, thread)), s, now, thread)))
+  Wake.exit(s, now, thread, code, Step.before(Nil{}, Retire.answers(M.Asks.all(s), thread),
+    Step.cat(Step.after(Launch.tell(s, now, thread, Task.finish(s, now, thread, Queue.drain(s, now, thread, Ended.out(s, now, thread, Hub.agent_gone.k(Hub.running(Hub.thread(s, thread)), thread, now, code, why))))),
+      Retire.asks(M.Asks.all(s), thread, now)), Bg.gone(Lost.live(Hub.thread(s, thread)), s, now, thread))))
 
 def Hub.agent_gone(+s: M.State, +now: Nat, +thread: String, +code: U32) -> Step:
   Hub.agent_gone.why(s, now, thread, code, "")
@@ -3414,7 +4656,7 @@ def Hub.tick.k(+s: M.State, +now: Nat, +kids: Map<&2, Nat>) -> Step:
         Step.join(Wt.stale(Map.values(&2, M.Thread, ts), s, now), Scratch.sweep(Map.values(&2, M.Thread, ts), kids, s, now, M.Scratch.window(s))))
 
 def Hub.tick(+s: M.State, +now: Nat) -> Step:
-  Step.join(Step.join(Hub.tick.k(s, now, M.Work.kids.map(s)), Update.due(s, now)), Update.held(s, now))
+  Step.join(Step.join(Step.join(Step.join(Hub.tick.k(s, now, M.Work.kids.map(s)), Update.due(s, now)), Update.held(s, now)), Step.cat(Lr.far.tick(s), Wake.poll(s))), Deploy.tick(s, now))
 
 # Asks keep their thread busy
 # ---------------------------
@@ -3468,6 +4710,10 @@ def Carry.restart(es: List<&2, M.Entry>) -> Bool:
 
 # progress since the last carry: the newest entry, past restart notes, is
 # anything but the continue message
+# the continue message, with a deploy's words after it or not
+def Carry.is(+text: String) -> Bool:
+  String.eq(String.take(text, String.length(M.Carry.text())), M.Carry.text())
+
 def Carry.fresh.go(es: List<&2, M.Entry>, skip: Bool) -> Bool:
   match es skip:
     case Nil{} _:
@@ -3475,7 +4721,7 @@ def Carry.fresh.go(es: List<&2, M.Entry>, skip: Bool) -> Bool:
     case _ <> +t True{}:
       Carry.fresh.go(t, Carry.restart(t))
     case M.Msg{_, _, _, +text, _} <> _ False{}:
-      Bool.not(String.eq(text, M.Carry.text()))
+      Bool.not(Carry.is(text))
     case _ False{}:
       True{}
 
@@ -3518,7 +4764,7 @@ def Rec.note(+th: String, +now: Nat, +seq: Nat, +text: String) -> M.Change:
 def Rec.turn.k(run: Bool, will: Bool, +s: M.State, +now: Nat, +th: String) -> Step:
   match run will:
     case True{} False{}:
-      Task.finish(s, now, th, Step{[Rec.note(th, now, Hub.seq(s), "Backplane restarted before this turn finished"), M.TurnChanged{th, M.Interrupted{}, now}], Nil{}})
+      Launch.tell(s, now, th, Task.finish(s, now, th, Step{[Rec.note(th, now, Hub.seq(s), "Backplane restarted before this turn finished"), M.TurnChanged{th, M.Interrupted{}, now}], Nil{}}))
     case True{} True{}:
       Step{[Rec.note(th, now, Hub.seq(s), "Backplane restarted before this turn finished"), M.TurnChanged{th, M.Interrupted{}, now}], Nil{}}
     case False{} _:
@@ -3772,18 +5018,19 @@ def Resume.clear(+s: M.State, +now: Nat, +th: String) -> List<&2, M.Change>:
 def Rec.lost.again(give: Bool, +s: M.State, +now: Nat, +th: String) -> Step:
   match give:
     case True{}:
-      Step{List.append(&2, M.Change, [M.ActivityLogged{th, Hub.id("l", now, Hub.seq(s)), "info", "lost", Lost.text(M.Bg.of(s, th), "restart"), now},
-        M.WorkSet{th, "bg", M.Bg.show(Lost.unknown(M.Bg.of(s, th))), now}, M.SettingSet{Resume.n.key(th), "0", now}], Resume.clear(s, now, th)), Nil{}}
+      Step{List.append(&2, M.Change, [M.ActivityLogged{th, Hub.id("l", now, Hub.seq(s)), "info", "lost", Lost.text(Lost.of(s, th), "restart"), now},
+        M.WorkSet{th, "bg", "", now}, M.SettingSet{Resume.n.key(th), "0", now}], List.append(&2, M.Change, Lost.unstash(s, now, th), Resume.clear(s, now, th))), Nil{}}
     case False{}:
-      Step{[M.SettingSet{Resume.n.key(th), Nat.show(1n+Resume.n(s, th)), now}], Nil{}}
+      Step{List.append(&2, M.Change, [M.SettingSet{Resume.n.key(th), Nat.show(1n+Resume.n(s, th)), now}], Lost.aside(s, now, th)), Nil{}}
 
 # a restart found a thread's work lost: with the setting off it is logged
-# (Bg.lost); else it is marked to be told (a marker already there counts
-# a restart it outlived, and on the second it is only logged)
+# (Bg.lost); else it is put aside (Lost.aside) and the thread marked to be
+# told (a marker already there counts a restart it outlived, and on the
+# second it is only logged)
 def Rec.lost.on(again: Bool, +s: M.State, +now: Nat, +th: String) -> Step:
   match again:
     case False{}:
-      Step{Resume.set(s, now, th, "restart"), Nil{}}
+      Step{List.append(&2, M.Change, Resume.set(s, now, th, "restart"), Lost.aside(s, now, th)), Nil{}}
     case True{}:
       Rec.lost.again(Nat.is_ge(1n+Resume.n(s, th), 2n), s, now, th)
 
@@ -3798,10 +5045,21 @@ def Rec.lost.k(has: Bool, live: Bool, on: Bool, +s: M.State, +now: Nat, +th: Str
     case True{} True{} True{}:
       Rec.lost.on(Bool.not(String.is_empty(Resume.why(s, th))), s, now, th)
 
+# rows left ended with an unknown outcome by an earlier restart (told
+# already) wait for nothing: their owner is gone, and they go at the next
+# (laws lostwork_recover_old_rows_go)
+def Rec.lost.old(old: Bool, +s: M.State, +now: Nat, +th: String) -> Step:
+  match old:
+    case True{}:
+      Step{Bg.clear(s, th, now), Nil{}}
+    case False{}:
+      Step.none()
+
 def Rec.lost.one(r: Rec, +now: Nat, +th: String) -> Rec:
   match r:
     case Rec{+s, cs, os}:
-      Rec.add(Rec{s, cs, os}, Rec.lost.k(Lost.new(M.Bg.of(s, th)), Lost.live(Hub.thread(s, th)), M.Carry.on(s), s, now, th))
+      Rec.add(Rec.add(Rec{s, cs, os}, Rec.lost.k(Lost.new(Lost.of(s, th)), Lost.live(Hub.thread(s, th)), M.Carry.on(s), s, now, th)),
+        Rec.lost.old(Bool.and(Bool.not(Lost.new(Lost.of(s, th))), Bool.not(List.is_empty(&2, String, M.Bg.of(s, th)))), s, now, th))
 
 def Rec.lost(ts: List<&2, String>, r: Rec, +now: Nat) -> Rec:
   match ts:
@@ -3814,12 +5072,40 @@ def Rec.lost(ts: List<&2, String>, r: Rec, +now: Nat) -> Rec:
 # running end (a carried child's task stays open), asks close, torn task
 # deliveries are finished, and lost background work is logged or marked
 # to be told (Hub.carry and Rec.release tell it)
+def Locks.recover.party(p: LK.LockParty, +s: M.State, +now: Nat) -> Step:
+  match p:
+    case LK.LockParty{+id, "work", +th, _, _, _}:
+      Watch.end.raw(s, now, th, id, "lost on restart", "The lock was released; start the work again if needed.")
+    case _:
+      Step.none()
+
+def Locks.recover.parties(ps: List<&2, LK.LockParty>, +s: M.State, +now: Nat, +st: Step) -> Step:
+  match ps:
+    case Nil{}:
+      st
+    case p <> t:
+      Locks.recover.parties(t, s, now, Step.cat(st, Locks.recover.party(p, M.State.replay(Queue.changes(st), s), now)))
+
+def Locks.recover.go(names: List<&2, String>, +s: M.State, +now: Nat, +st: Step) -> Step:
+  match names:
+    case Nil{}:
+      st
+    case +name <> t:
+      +l = M.Locks.get(s, name)
+      +ps = List.append(&2, LK.LockParty, LK.Lock.holder.list(LK.Lock.holder(l)), LK.Lock.waiters(l))
+      Locks.recover.go(t, s, now, Step.cat(Locks.recover.parties(ps, s, now, st), Step{Nil{}, Bool.pick(List<&2, Out>, String.is_empty(LK.Lock.owner(l)), Nil{}, [LockGuard{name, "", LK.Lock.owner(l)}])}))
+
+def Locks.recover(+s: M.State, +now: Nat) -> Step:
+  Locks.recover.go(M.Locks.names(s), s, now, Step.none())
+
 def Hub.recover.k(+s: M.State, +now: Nat) -> Step:
   Rec.step(Rec.lost(Rec.ids(Rec.threads(s)), Rec.repair(Rec.turns(Rec.ids(Rec.threads(s)), Rec.asks(M.Asks.all(s), Rec{s, Nil{}, Nil{}}, now), s, now), s, now), now))
 
 # (and every watched work still open is watched again: Watch.rearm)
 def Hub.recover(+s: M.State, +now: Nat) -> Step:
-  Step.cat(Step{Nil{}, Watch.rearm(s)}, Hub.recover.k(s, now))
+  +locks = Locks.recover(s, now)
+  +s1 = M.State.replay(Queue.changes(locks), s)
+  Step.cat(locks, Step.cat(Step{Nil{}, Watch.rearm(s1)}, Hub.recover.k(s1, now)))
 
 # Carrying on
 # -----------
@@ -3834,7 +5120,7 @@ def Hub.recover(+s: M.State, +now: Nat) -> Step:
 def Carry.k(go: Bool, +s: M.State, +now: Nat, +th: String) -> Step:
   match go:
     case True{}:
-      Step.after(Hub.post(s, now, th, Hub.id("c", now, Hub.seq(s)), M.User{}, M.Carry.text()),
+      Step.after(Hub.post(s, now, th, Hub.id("c", now, Hub.seq(s)), M.User{}, M.Carry.text() ++ DP.Deploy.suffix(s, VER.Version.current())),
         [M.ActivityLogged{th, Hub.id("r", now, 1n+Hub.seq(s)), "info", "restart", "Continuing after the restart", now}])
     case False{}:
       Step.none()
@@ -3904,7 +5190,7 @@ def Carry.go(on: Bool, +before: M.State, +after: M.State, +now: Nat) -> Step:
 # before: the state Hub.recover started from; after: once its step applied
 # (turns carried on and lost work told, Rec.burst() threads at most)
 def Hub.carry(+before: M.State, +after: M.State, +now: Nat) -> Step:
-  Carry.go(M.Carry.on(after), before, after, now)
+  Step.cat(Carry.go(M.Carry.on(after), before, after, now), Deploy.after(after, now))
 
 def Rel.k(run: Bool, live: Bool, r: Rec, +now: Nat, +th: String) -> Rec:
   match run live r:
@@ -3961,6 +5247,40 @@ def Lost.released(+on: Bool) -> M.State:
 
 def Lost.marked() -> M.State:
   M.State.replay(List.append(&2, M.Change, Resume.set(Lost.demo(True{}, False{}), 4n, "t1", "restart"), [M.TurnQueued{"t1", "q1", "held", 4n}]), Lost.demo(True{}, False{}))
+
+# a thread whose background shell an earlier restart left ended, outcome unknown
+def Lost.stale(+on: Bool) -> M.State:
+  M.State.replay([M.WorkSet{"t1", "bg", M.Bg.line("b1", M.Bg.ended.mark() ++ "unknown"), 5n}], Lost.demo(on, False{}))
+
+# the agent of thread th exited
+def Lost.exited(+s: M.State, +th: String) -> M.State:
+  M.State.replay(Queue.changes(Hub.agent_gone(s, 9n, th, 0)), s)
+
+# an idle thread t0 with a background shell and a running child task
+def Lost.parent() -> M.State:
+  M.State.replay([M.WorkSet{"t0", "bg", "b1\tsleep 60\tc1\tsleep 60\tshell", 3n}], Task.demo(False{}))
+
+def Lost.open.go(ids: List<&2, String>, +s: M.State) -> Nat:
+  match ids:
+    case Nil{}:
+      0n
+    case +i <> t:
+      Nat.add(M.Bg.running(M.Bg.of(s, i)), Lost.open.go(t, s))
+
+# how many background rows are at work, over every thread
+def Lost.open(+s: M.State) -> Nat:
+  Lost.open.go(Rec.ids(Rec.threads(s)), s)
+
+def Lost.held.go(ids: List<&2, String>, +s: M.State) -> Nat:
+  match ids:
+    case Nil{}:
+      0n
+    case +i <> t:
+      Nat.add(M.Bg.live(M.Bg.of(s, i)), Lost.held.go(t, s))
+
+# how many background rows are filed (ended ones too: they count as work)
+def Lost.held(+s: M.State) -> Nat:
+  Lost.held.go(Rec.ids(Rec.threads(s)), s)
 
 def Lost.running.go(ids: List<&2, String>, +s: M.State) -> Nat:
   match ids:
@@ -4131,7 +5451,7 @@ def Gen.stale(+tagged: String, +current: String) -> Bool:
 
 # the tools that only read
 def Gen.reads(+tool: String) -> Bool:
-  Nat.is_lt(C.Codec.pos(["orchestrator_capabilities", "task_status", "thread_list", "thread_read", "thread_wait", "thread_wait_now", "work_list", "project_list", "machine_list"], tool), 9n)
+  Nat.is_lt(C.Codec.pos(["orchestrator_capabilities", "task_status", "thread_list", "thread_read", "thread_wait", "thread_wait_now", "work_list", "project_list", "machine_list", "plane_read", "told_check", "task_board_list", "deploy_status"], tool), 13n)
 
 # an MCP request that changes something: a tools/call of any tool that does
 # not only read (initialize, tools/list and the like change nothing)
@@ -4262,3 +5582,166 @@ def Retire.task(+s: M.State) -> Bool:
 def Retire.demo() -> M.State:
   M.State.replay([M.ThreadCreated{"t0", "p1", "x", M.Local{}, "", "", "codex", "", 1n}, M.TaskDelegated{"k1", "t0", "t1", 1n, "codex", "", 2n},
     M.AskOpened{"a2", "t1", "plan", "", "plan", "", 3n}], Rec.demo(M.Running{}))
+
+# Launched threads: the laws' examples
+# ------------------------------------
+
+# messages a step sends to a thread (posted, or queued behind its turn)
+def Lr.count(cs: List<&2, M.Change>, +th: String) -> Nat:
+  match cs:
+    case Nil{}:
+      0n
+    case M.MessagePosted{+t, _, _, _, _} <> rest:
+      Nat.add(Bool.pick(Nat, String.eq(t, th), 1n, 0n), Lr.count(rest, th))
+    case M.TurnQueued{+t, _, _, _} <> rest:
+      Nat.add(Bool.pick(Nat, String.eq(t, th), 1n, 0n), Lr.count(rest, th))
+    case _ <> rest:
+      Lr.count(rest, th)
+
+def Lr.queued(cs: List<&2, M.Change>, +th: String) -> Nat:
+  match cs:
+    case Nil{}:
+      0n
+    case M.TurnQueued{+t, _, _, _} <> rest:
+      Nat.add(Bool.pick(Nat, String.eq(t, th), 1n, 0n), Lr.queued(rest, th))
+    case _ <> rest:
+      Lr.queued(rest, th)
+
+# t0 launched t1 (report: whether it reports back) with t0's own message
+# (own) or the person's; t1 runs; t0 runs too (busy); more: changes after
+def Lr.demo.k(+report: Bool, +own: Bool, +busy: Bool, more: List<&2, M.Change>) -> M.State:
+  M.State.replay(List.concat(&2, M.Change, [[M.ProjectCreated{"p1", "p", "/p", 1n}, M.ThreadCreated{"t0", "p1", "boss", M.Local{}, "", "", "claude", "", 1n},
+    M.ThreadCreated{"t1", "p1", "work", M.Local{}, "", "", "claude", "", 1n}, M.ThreadLaunched{"t1", "t0", report, 1n},
+    M.MessagePosted{"t1", Bool.pick(String, own, M.Link.id("t0", "m1"), "m1"), M.User{}, "go", 1n}, M.TurnChanged{"t1", M.Running{}, 1n},
+    M.MessagePosted{"t1", "a1", M.Assistant{}, "done it", 2n}], Bool.pick(List<&2, M.Change>, busy, [M.TurnChanged{"t0", M.Running{}, 2n}], Nil{}), more]), M.State.empty())
+
+def Lr.demo(+report: Bool) -> M.State:
+  Lr.demo.k(report, False{}, False{}, Nil{})
+
+# what t0 hears when t1's step has these changes
+def Lr.demo.tell(+s: M.State, cs: List<&2, M.Change>) -> Nat:
+  Lr.count(Queue.changes(Launch.tell(s, 9n, "t1", Step{cs, Nil{}})), "t0")
+
+def Lr.demo.end() -> List<&2, M.Change>:
+  [M.TurnChanged{"t1", M.Completed{}, 9n}]
+
+# t1's turn ends twice, t0 busy: both reports wait in t0's queue, in order
+def Lr.demo.twice.k(+s1: M.State) -> Nat:
+  Lr.queued(Queue.changes(Launch.tell(s1, 11n, "t1", Step{[M.TurnChanged{"t1", M.Completed{}, 11n}], Nil{}})), "t0")
+
+def Lr.demo.twice() -> Nat:
+  +s = Lr.demo.k(True{}, False{}, True{}, Nil{})
+  +st = Launch.tell(s, 9n, "t1", Step{Lr.demo.end(), Nil{}})
+  +s1 = M.State.replay(List.append(&2, M.Change, Queue.changes(st), [M.MessagePosted{"t1", "m2", M.User{}, "again", 10n}, M.TurnChanged{"t1", M.Running{}, 10n}]), s)
+  Nat.add(Lr.queued(Queue.changes(st), "t0"), Lr.demo.twice.k(s1))
+
+# the loop's bound: t0 started t1's turn Lr.loops() times in a row
+def Lr.demo.loop() -> M.State:
+  Lr.demo.k(True{}, True{}, False{}, [M.SettingSet{Lr.n.key("t1"), Nat.show(Nat.sub(Lr.loops(), 1n)), 1n}])
+
+def Lr.demo.loop.on() -> Bool:
+  M.Launch.reports(M.State.replay(Queue.changes(Launch.tell(Lr.demo.loop(), 9n, "t1", Step{Lr.demo.end(), Nil{}})), Lr.demo.loop()), "t1")
+
+# Alerts: the laws' examples
+# --------------------------
+
+# the asks a step opens (needs on, or off): the Alerted outs it gets
+def Alerts.demo.asks(off: Bool) -> Nat:
+  +s = M.State.replay(Bool.pick(List<&2, M.Change>, off, [M.SettingSet{"notify.needs", "off", 1n}], Nil{}), NO.Policy.demo.s(NO.Policy.demo.ask()))
+  List.length(&2, Out, Alerts.outs(Alerts.changes(s, [M.AskOpened{"k1", "t1", "approval", "Bash", "ls", "", 20n}]), Nil{}))
+
+def Alerts.demo.merge.k(st: Step) -> String:
+  match st:
+    case Step{+cs, _}:
+      NO.Policy.said(cs) ++ " " ++ Nat.show(List.length(&2, Out, Alerts.outs(cs, Nil{})))
+
+# a merge found: its record's kind and the Alerted outs of the step
+def Alerts.demo.merge() -> String:
+  +s = NO.Policy.demo.s(NO.Policy.demo.ask())
+  Alerts.demo.merge.k(Merge.found(True{}, s, 30n, 0, "i", "t1", "http://x/pull/1"))
+
+def Alerts.demo.end.k(st: Step) -> String:
+  match st:
+    case Step{+cs, _}:
+      NO.Policy.said(cs) ++ " " ++ Nat.show(List.length(&2, Out, Alerts.outs(cs, Nil{})))
+
+# a turn that ends (the person's message, a completed ready turn): the
+# step's record and its Alerted out
+def Alerts.demo.end() -> String:
+  +s = NO.Policy.demo.s(NO.Policy.demo.cat([NO.Policy.demo.base(), NO.Policy.demo.run("t1", "m1", "do it", 10n)]))
+  Alerts.demo.end.k(Ended.out(s, 13n, "t1", Step{NO.Policy.demo.done("t1", 12n), Nil{}}))
+
+# Small replayed states used by the wake laws and tests.
+def Wake.demo(+once: Bool, +events: List<&2, String>) -> M.State:
+  M.State.replay([M.ThreadCreated{"tb", "", "Bot", M.Local{}, "", "", "claude", "", 1n}, M.BotSet{"bot", "Bot", "tb", 0n, "", 1n},
+    M.ThreadCreated{"t1", "", "Fix DRC", M.Local{}, "", "", "claude", "", 1n}, M.TurnChanged{"t1", M.Running{}, 2n}, M.MessagePosted{"t1", "a1", M.Assistant{}, "DRC fixed", 3n},
+    M.WakeSet{"w1", "tb", "thread", "t1", events, once, "review it", 4n}], M.State.empty())
+
+def Wake.demo.end() -> List<&2, M.Change>:
+  [M.TurnChanged{"t1", M.Completed{}, 9n}]
+
+def Wake.demo.step(+s: M.State) -> Step:
+  Launch.tell(s, 9n, "t1", Step{Wake.demo.end(), Nil{}})
+
+def Wake.demo.count(+s: M.State) -> Nat:
+  Lr.count(Queue.changes(Wake.demo.step(s)), "tb")
+
+def Wake.demo.twice() -> Nat:
+  +s = Wake.demo(False{}, ["end"])
+  Wake.demo.count(M.State.replay(Queue.changes(Wake.demo.step(s)), s))
+
+def Wake.demo.dropped() -> Nat:
+  +s = Wake.demo(True{}, ["end"])
+  List.length(&2, String, WK.Wake.by(M.State.replay(Queue.changes(Wake.demo.step(s)), s), "tb"))
+
+def Wake.demo.pr() -> M.State:
+  M.State.replay([M.WakeSet{"wp", "tb", "pr", "owner/repo#7", ["merged", "ci"], False{}, "", 4n}], Wake.demo(True{}, ["end"]))
+
+def Wake.demo.merged() -> WK.PrSeen:
+  WK.PrSeen{"MERGED", "now", "abc", "passed", ["pcb.kicad_pcb"], "7", "Route board", "checks-1", ""}
+
+def Wake.demo.pr.twice() -> Nat:
+  +s = Wake.demo.pr()
+  +st = Wake.pr(s, 9n, "owner/repo#7", Wake.demo.merged())
+  Lr.count(Queue.changes(Wake.pr(M.State.replay(Queue.changes(st), s), 10n, "owner/repo#7", Wake.demo.merged())), "tb")
+
+def Wake.demo.partial() -> Nat:
+  +s = Wake.demo(False{}, ["ask", "end", "done"])
+  +cs = {M.AskOpened{"q1", "t1", "question", "AskUserQuestion", "review?", "", 9n} <> Wake.demo.end() : List<&2, M.Change>}
+  +after = M.State.replay(Queue.changes(Launch.tell(s, 9n, "t1", Step{cs, Nil{}})), s)
+  Lr.count(Queue.changes(Launch.tell(after, 9n, "t1", Step{Wake.demo.end(), Nil{}})), "tb")
+
+# Compact fixtures for the lock laws: real state fold, grant path and work end.
+def Locks.demo() -> M.State:
+  M.State.replay([M.ProjectCreated{"p1", "P", "/p", 1n}, M.ThreadCreated{"ta", "p1", "A", M.Local{}, "", "", "claude", "", 1n}, M.ThreadCreated{"tb", "p1", "B", M.Local{}, "", "", "claude", "", 1n}], M.State.empty())
+
+def Locks.demo.party(+id: String) -> LK.LockParty:
+  LK.LockParty{id, "thread", id, "build", 2n, 0n}
+
+def Locks.demo.queue() -> M.State:
+  M.State.replay([M.LockChanged{"bend", LK.Lock.acquire(LK.Lock.acquire(LK.Lock.empty(), Locks.demo.party("ta"), True{}), Locks.demo.party("tb"), False{}), 3n}], Locks.demo())
+
+def Locks.demo.release() -> M.State:
+  +s = Locks.demo.queue()
+  M.State.replay(Queue.changes(Locks.after(s, 4n, Locks.release(s, 4n, "bend", "ta"))), s)
+
+def Locks.demo.grant() -> Step:
+  +s = Locks.demo.release()
+  Locks.after(s, 5n, Locks.ready(s, 5n, "bend", "tb"))
+
+def Locks.demo.twice() -> Nat:
+  +s = M.State.replay(Queue.changes(Locks.demo.grant()), Locks.demo.release())
+  Lr.count(Queue.changes(Locks.after(s, 6n, Locks.ready(s, 6n, "bend", "tb"))), "tb")
+
+def Locks.demo.deleted() -> String:
+  +s = Locks.demo.queue()
+  LK.Lock.owner(M.Locks.get(M.State.replay(Queue.changes(Locks.after(s, 4n, Step{[M.ThreadDeleted{"ta", 4n}], Nil{}})), s), "bend"))
+
+def Locks.demo.work() -> M.State:
+  +s = Locks.demo()
+  +a = J.Json.obj([J.KV{"lock", J.Str{"bend"}}, J.KV{"command", J.Str{"true"}}])
+  M.State.replay(Queue.changes(Locks.work.start(s, 3n, "ta", a, True{})), s)
+
+def Locks.demo.work.end() -> String:
+  +s = Locks.demo.work()
+  LK.Lock.owner(M.Locks.get(M.State.replay(Queue.changes(Locks.after(s, 4n, Watch.end(s, 4n, "ta", Watch.id(Locks.demo(), "ta"), "exit 0", ""))), s), "bend"))

@@ -167,7 +167,7 @@ def Nui.effects(cs: List<&2, U.Cmd>, n: Nui) -> Nui:
       n
     case U.Focus{+id} <> t Nui{u, w, h, mx, my, sd, sc, ca, _, pa, hi, ms, vw}:
       Nui.effects(t, Nui{u, w, h, mx, my, sd, sc, ca, Fld.alias(id), pa, hi, ms, vw})
-    case U.Scroll{} <> t Nui{u, w, h, mx, my, sd, _, ca, fo, pa, hi, ms, vw}:
+    case U.ScrollEnd{} <> t Nui{u, w, h, mx, my, sd, _, ca, fo, pa, hi, ms, vw}:
       Nui.effects(t, Nui{u, w, h, mx, my, sd, 0, ca, fo, pa, hi, ms, vw})
     case U.Jump{_} <> t Nui{u, w, h, mx, my, sd, sc, ca, fo, pa, hi, ms, vw}:
       Nui.effects(t, Nui{U.Ui.scratch_set(u, "@jump.go", "1"), w, h, mx, my, sd, sc, ca, fo, pa, hi, ms, vw})
@@ -461,12 +461,14 @@ def Vw.scene.k(same: Bool, t: FA.Scene3) -> FA.Scene3:
     case False{}:
       FA.Scene3.none()
 
+# (another kind of view starting over forgets the source it showed, so
+# coming back to it, from the Review tab say, reads it again)
 def Vw.kind_set.k(keep: Bool, v: V.Vw, +k: U32, +path: String) -> V.Vw:
   match keep v:
     case True{} V.Vw{s, vi, f, r, d, lx, ly, b, fr, cu, V.Vx{_, p, t, c, sh, bu, px, py, _, se, bm}}:
       V.Vw{s, vi, f, r, d, lx, ly, b, fr, cu, V.Vx{k, p, t, c, sh, bu, px, py, path, se, bm}}
-    case False{} V.Vw{_, vi, _, r, d, lx, ly, b, _, cu, V.Vx{+k0, _, t, c, sh, bu, px, py, +p0, se, bm}}:
-      V.Vw{Nil{}, V.View{1.0, 0.0, 0.0}, False{}, "", d, lx, ly, b, False{}, cu, V.Vx{k, "", Vw.scene.k(Bool.and(U32.is_eq(k, k0), String.eq(path, p0)), t), c, sh, bu, px, py, path, se, bm}}
+    case False{} V.Vw{_, vi, _, r, d, lx, ly, b, _, cu, V.Vx{+k0, _, t, c, +sh, bu, px, py, +p0, se, bm}}:
+      V.Vw{Nil{}, V.View{1.0, 0.0, 0.0}, False{}, "", d, lx, ly, b, False{}, cu, V.Vx{k, "", Vw.scene.k(Bool.and(U32.is_eq(k, k0), String.eq(path, p0)), t), c, Bool.pick(String, U32.is_eq(k, k0), sh, ""), bu, px, py, path, se, bm}}
 
 def Vw.path(v: V.Vw) -> String:
   match v:
@@ -823,6 +825,22 @@ def Nui.lfocus(+n: Nui) -> LY.Focus:
 def Nui.lfocus.bits(+n: Nui) -> U32:
   LY.Lyr.kind.with(0, Nui.lfocus(n))
 
+# Design review: a comparison's marks follow the active layer (client.bend's
+# Rv.bits through the core action rv-bits)
+def Rvw.bits(+n: Nui, +f: LY.Focus) -> Step:
+  Nui.act(n, "rv-bits", U32.show(U.Rv.bits(Vw.kind(Nui.vw(n)), f)))
+
+def Rvw.cat(cs: List<&2, NCmd>, s: Step) -> Step:
+  match s:
+    case Step{+n, +ds, d}:
+      Step{n, List.append(&2, NCmd, cs, ds), True{}}
+
+# Reset layers: every layer is compared again
+def Rvw.reset(s: Step) -> Step:
+  match s:
+    case Step{+n, cs, d}:
+      Rvw.cat(cs, Nui.act(n, "rv-bits", "0"))
+
 # the viewer's light ground (its sun/moon button, "@vw.light"), and the
 # window's light theme (Settings, Appearance: the hub's "ui.theme")
 def Nui.vlight(+n: Nui) -> Bool:
@@ -974,34 +992,34 @@ def Pnl.unit(+p: Pnl, +c: MS.Cam) -> F32:
 def Vx.drag(x: V.Vx, +m: U32, +dx: F32, +dy: F32, +pn: Pnl) -> V.Vx:
   match x:
     case V.Vx{k, p, t, +c, sh, bu, +px, +py, pa, se, bm}:
-      V.Vx{k, p, t, Cam.drag(m, c, dx, dy, Pnl.unit(pn, c), Pnl.cx(pn, px), Pnl.cy(pn, py)), sh, bu, px, py, pa, se, bm}
+      V.Vx{k, p, t, [Cam.drag(m, V.Vx.cam(c), dx, dy, Pnl.unit(pn, V.Vx.cam(c)), Pnl.cx(pn, px), Pnl.cy(pn, py))], sh, bu, px, py, pa, se, bm}
 
 def Vx.wheel(x: V.Vx, +f: F32, +mx: U32, +my: U32, +pn: Pnl) -> V.Vx:
   match x:
     case V.Vx{k, p, t, +c, sh, bu, px, py, pa, se, bm}:
-      V.Vx{k, p, t, MS.Cam.zoom_at(c, f, Pnl.cx(pn, mx), Pnl.cy(pn, my), Pnl.unit(pn, c)), sh, bu, px, py, pa, se, bm}
+      V.Vx{k, p, t, [MS.Cam.zoom_at(V.Vx.cam(c), f, Pnl.cx(pn, mx), Pnl.cy(pn, my), Pnl.unit(pn, V.Vx.cam(c)))], sh, bu, px, py, pa, se, bm}
 
 def Vx.key(x: V.Vx, +a: U32, +pn: Pnl) -> V.Vx:
   match x:
     case V.Vx{k, p, t, +c, sh, bu, px, py, pa, se, bm}:
-      V.Vx{k, p, t, Cam.key(a, c, Pnl.unit(pn, c)), sh, bu, px, py, pa, se, bm}
+      V.Vx{k, p, t, [Cam.key(a, V.Vx.cam(c), Pnl.unit(pn, V.Vx.cam(c)))], sh, bu, px, py, pa, se, bm}
 
 def Vx.zoom(x: V.Vx, +f: F32) -> V.Vx:
   match x:
-    case V.Vx{k, p, t, c, sh, bu, px, py, pa, se, bm}:
-      V.Vx{k, p, t, MS.Cam.zoom(c, F32.div(1.0, f)), sh, bu, px, py, pa, se, bm}
+    case V.Vx{k, p, t, +c, sh, bu, px, py, pa, se, bm}:
+      V.Vx{k, p, t, [MS.Cam.zoom(V.Vx.cam(c), F32.div(1.0, f))], sh, bu, px, py, pa, se, bm}
 
 # a new scene, seen from the first side
 def Vx.fit(x: V.Vx) -> V.Vx:
   match x:
     case V.Vx{k, p, +t, _, sh, bu, px, py, pa, se, bm}:
-      V.Vx{k, p, t, FA.Scene3.fit(t), sh, bu, px, py, pa, se, bm}
+      V.Vx{k, p, t, [FA.Scene3.fit(t)], sh, bu, px, py, pa, se, bm}
 
 # zoom to fit, turned as it is
 def Vx.refit(x: V.Vx) -> V.Vx:
   match x:
-    case V.Vx{k, p, +t, c, sh, bu, px, py, pa, se, bm}:
-      V.Vx{k, p, t, FA.Scene3.refit(t, c), sh, bu, px, py, pa, se, bm}
+    case V.Vx{k, p, +t, +c, sh, bu, px, py, pa, se, bm}:
+      V.Vx{k, p, t, [FA.Scene3.refit(t, V.Vx.cam(c))], sh, bu, px, py, pa, se, bm}
 
 # a drag pans a board or schematic and moves a 3D model's camera (the
 # modifiers pick how, Drag.mode)
@@ -1610,7 +1628,7 @@ def Nui.goto(+n: Nui, +pid: String) -> Step:
 
 # the focus changed: the scene is drawn again under it
 def Nui.lfocus.set(+n: Nui, +f: LY.Focus) -> Step:
-  Step{Nui.with_vw(Nui.with_ui(n, U.Ui.scratch_set(Nui.ui(n), Nui.lfocus.key(n), LY.Lyr.show(f))), Vw.stale(Nui.vw(n))), Nil{}, True{}}
+  Rvw.bits(Nui.with_vw(Nui.with_ui(n, U.Ui.scratch_set(Nui.ui(n), Nui.lfocus.key(n), LY.Lyr.show(f))), Vw.stale(Nui.vw(n))), f)
 
 # the kind of the scene on show (0 a board, 1 a schematic)
 def Nui.look.kind(+n: Nui) -> U32:
@@ -1820,10 +1838,11 @@ def Nui.prepare.k(open: Bool, +n: Nui) -> Nui:
 # a kind of view by name (View.kind_of reads it back)
 def View.name(+k: U32) -> String:
   Bool.pick(String, U32.is_eq(k, 1), "schematic", Bool.pick(String, U32.is_eq(k, 2), "3d", Bool.pick(String, U32.is_eq(k, 3), "browser", Bool.pick(String, U32.is_eq(k, 4), "diff", Bool.pick(String, U32.is_eq(k, 5), "mech",
-    Bool.pick(String, U32.is_eq(k, 6), "files", Bool.pick(String, U32.is_eq(k, 7), "image", Bool.pick(String, U32.is_eq(k, 8), "pdf", "board"))))))))
+    Bool.pick(String, U32.is_eq(k, 6), "files", Bool.pick(String, U32.is_eq(k, 7), "image", Bool.pick(String, U32.is_eq(k, 8), "pdf", Bool.pick(String, U32.is_eq(k, 9), "review", "board")))))))))
 
 # the kind of view for a requested file: named, else from its extension
 def View.kind_of(+kind: String, +path: String) -> U32:
+  Bool.pick(U32, String.eq(kind, "review"), 9,
   Bool.pick(U32, String.eq(kind, "files"), 6,
   Bool.pick(U32, String.eq(kind, "image"), 7,
   Bool.pick(U32, String.eq(kind, "pdf"), 8,
@@ -1834,7 +1853,7 @@ def View.kind_of(+kind: String, +path: String) -> U32:
     Bool.pick(U32, Bool.or(String.eq(kind, "3d"), String.eq(kind, "step")), 2,
       Bool.pick(U32, String.eq(kind, "board"), 0,
         Bool.pick(U32, String.ends_with(path, ".kicad_sch"), 1,
-          Bool.pick(U32, Bool.or(String.ends_with(path, ".glb"), Bool.or(String.ends_with(path, ".step"), String.ends_with(path, ".stp"))), 2, 0)))))))))))
+          Bool.pick(U32, Bool.or(String.ends_with(path, ".glb"), Bool.or(String.ends_with(path, ".step"), String.ends_with(path, ".stp"))), 2, 0))))))))))))
 
 def Vx.seen(x: V.Vx) -> String:
   match x:
@@ -2155,9 +2174,17 @@ def Pane.at(+v: String, +i: Nat) -> String:
 def Pane.to(+cur: Nat, +last: Nat, +dir: U32) -> Nat:
   Bool.pick(Nat, U32.is_eq(dir, 0), Nat.sub(cur, 1n), Bool.pick(Nat, Nat.is_lt(cur, last), 1n+cur, last))
 
+# the Review page's lines go by three
+def Rpw.to(rp: Bool, +cur: Nat, +last: Nat, +dir: U32) -> Nat:
+  match rp:
+    case True{}:
+      Bool.pick(Nat, U32.is_eq(dir, 0), Nat.sub(cur, 3n), Bool.pick(Nat, Nat.is_lt(Nat.add(cur, 3n), last), Nat.add(cur, 3n), last))
+    case False{}:
+      Pane.to(cur, last, dir)
+
 def Pane.step(+n: Nui, +key: String, +last: Nat, +dir: U32) -> Step:
   Step{Nui.with_ui(n, U.Ui.info_set(Nui.ui(n), "pane:" ++ key,
-    Nat.show(Pane.to(Maybe.default(&2, Nat, Nat.read(U.Ui.info(Nui.ui(n), "pane:" ++ key)), 0n), last, dir)))), Nil{}, True{}}
+    Nat.show(Rpw.to(String.starts_with(key, "rp:"), Maybe.default(&2, Nat, Nat.read(U.Ui.info(Nui.ui(n), "pane:" ++ key)), 0n), last, dir)))), Nil{}, True{}}
 
 # the wheel over the open picker scrolls its models, elsewhere as before
 def Menu.spin(none: Bool, +v: String, +n: Nui, +x: U32, +y: U32, +dir: U32) -> Step:
@@ -2300,6 +2327,11 @@ def Cq.vert(+code: U32, +mods: U32) -> String:
 def Cq.is_vert(+code: U32, +mods: U32) -> Bool:
   Bool.and(Bool.or(U32.is_eq(code, Key.up()), U32.is_eq(code, Key.down())), U32.is_eq(U32.and(mods, 6), 0))
 
+# Up/Down move the caret by lines only while the composer offers no menu;
+# with one, they move its highlight (Nui.composer.ar)
+def Cq.menu_free(vert: Bool, +n: Nui) -> Bool:
+  Bool.and(vert, Bool.not(Nui.skills_on(Nui.ui(n))))
+
 def Cq.at(+k: String, +x: U32, +y: U32) -> String:
   k ++ "," ++ U32.show(x) ++ "," ++ U32.show(y)
 
@@ -2321,7 +2353,7 @@ def Nui.composer.key(vert: Bool, n: Nui, +m: Nat, +code: U32, +text: U32, +mods:
 def Nui.field.k(comp: Bool, path: Bool, n: Nui, +m: Nat, +code: U32, +text: U32, +mods: U32) -> Step:
   match comp path n:
     case True{} _ +n2:
-      Nui.composer.key(Cq.is_vert(code, mods), n2, m, code, text, mods)
+      Nui.composer.key(Cq.menu_free(Cq.is_vert(code, mods), n2), n2, m, code, text, mods)
     case False{} True{} Nui{u, w, h, mx, my, sd, sc, +ca, fo, +pa, hi, ms, vw}:
       Nui.path.k(Ed.key(code, text, mods, pa, ca, m), Nui{u, w, h, mx, my, sd, sc, ca, fo, pa, hi, ms, vw})
     case _ _ +n2:
@@ -2355,7 +2387,7 @@ def Nui.paste.e(none: Bool, +key: String, +n: Nui, text: String) -> Step:
 def Nui.paste(+n: Nui, text: String) -> Step:
   Nui.paste.e(String.is_empty(EM.Emb.focused(Nui.focus_of(n))), EM.Emb.focused(Nui.focus_of(n)), n, text)
 
-def Nui.key.3d.k(none: Bool, +n: Nui, +a: U32) -> Step:
+def Nui.key.view3.k(none: Bool, +n: Nui, +a: U32) -> Step:
   match none:
     case True{}:
       Step{n, Nil{}, False{}}
@@ -2363,10 +2395,10 @@ def Nui.key.3d.k(none: Bool, +n: Nui, +a: U32) -> Step:
       Step{Nui.with_vw(n, Vw.key(Nui.vw(n), a, Nui.pnl(n))), Nil{}, True{}}
 
 # the 3D viewer's keys (Key3.act), when it is open and no field has focus
-def Nui.key.3d(on: Bool, +n: Nui, +code: U32, +mods: U32) -> Step:
+def Nui.key.view3(on: Bool, +n: Nui, +code: U32, +mods: U32) -> Step:
   match on:
     case True{}:
-      Nui.key.3d.k(U32.is_eq(Key3.act(code, mods), 0), n, Key3.act(code, mods))
+      Nui.key.view3.k(U32.is_eq(Key3.act(code, mods), 0), n, Key3.act(code, mods))
     case False{}:
       Step{n, Nil{}, False{}}
 
@@ -2375,7 +2407,7 @@ def Nui.key.free(nofocus: Bool, fit: Bool, +n: Nui, +code: U32, +text: U32, +mod
     case True{} True{}:
       Step{Nui.with_vw(n, Vw.refit(Nui.vw(n))), Nil{}, True{}}
     case True{} False{}:
-      Nui.key.3d(Bool.and(Nui.panel(n), U32.is_eq(Vw.kind(Nui.vw(n)), 2)), n, code, mods)
+      Nui.key.view3(Bool.and(Nui.panel(n), U32.is_eq(Vw.kind(Nui.vw(n)), 2)), n, code, mods)
     case _ _:
       Nui.field.k(String.eq(Nui.focus_of(n), "composer"), Nui.in_path(n), n, Nui.mark(n), code, text, mods)
 
@@ -2387,12 +2419,21 @@ def Esc.field(find: Bool, +n: Nui) -> Step:
     case False{}:
       Nui.focus(n, "")
 
+# Esc in the composer shuts the menu it offers (completions) and does
+# nothing else; with none shown it leaves the field
+def Esc.menu(menu: Bool, +n: Nui) -> Step:
+  match menu:
+    case True{}:
+      Nui.act(n, "skill-close", "")
+    case False{}:
+      Esc.field(String.eq(Nui.focus_of(n), Fld.id("pq", "proj-go", "")), n)
+
 def Nui.key.k(paste: Bool, esc: Bool, +n: Nui, +code: U32, +text: U32, +mods: U32) -> Step:
   match paste esc:
     case True{} _:
       Step{n, [NPaste{}], False{}}
     case False{} True{}:
-      Esc.field(String.eq(Nui.focus_of(n), Fld.id("pq", "proj-go", "")), n)
+      Esc.menu(Bool.and(String.eq(Nui.focus_of(n), "composer"), Nui.skills_on(Nui.ui(n))), n)
     case False{} False{}:
       Nui.key.free(String.is_empty(Nui.focus_of(n)), U32.is_eq(code, 102), n, code, text, mods)
 
@@ -2485,7 +2526,7 @@ def Nui.sheet.at(+n: Nui) -> Nat:
 # show tree row i (a new scene: it fades in and refits)
 def Nui.sheet.go(+n: Nui, +i: Nat) -> Step:
   Step{Nui.with_vw(Nui.with_ui(n, U.Ui.scratch_set(Nui.ui(n), "@vw.at", Nat.show(i))),
-    Vw.kind_set(Nui.vw(n), 1, HI.Hier.file(Nui.rows(n), i))), Nil{}, True{}}
+    Vw.kind_set(Nui.vw(n), 1, U.Rv.sheet(Vw.path(Nui.vw(n)), HI.Hier.file(Nui.rows(n), i)))), Nil{}, True{}}
 
 def Nui.sheet.open(m: Maybe<&2, Nat>, +n: Nui) -> Step:
   match m:
@@ -2499,7 +2540,7 @@ def Nui.layers.set(+n: Nui, +flip: U32) -> Step:
 
 # Reset layers: every layer as it is by default, no focus
 def Nui.layers.reset(+n: Nui) -> Step:
-  Nui.layers.set(Nui.with_ui(n, U.Ui.scratch_set(Nui.ui(n), Nui.lfocus.key(n), "")), 0)
+  Rvw.reset(Nui.layers.set(Nui.with_ui(n, U.Ui.scratch_set(Nui.ui(n), Nui.lfocus.key(n), "")), 0))
 
 
 # the viewer's sun/moon button: its own light or dark ground, whatever
@@ -2540,7 +2581,7 @@ def Nui.vw_act.more(i: Nat, +n: Nui, +value: String) -> Step:
 def Nui.vw_act.k(i: Nat, +n: Nui, +value: String) -> Step:
   match i:
     case 0n:
-      Step{Nui.with_ui(n, U.Ui.view_pick(Nui.ui(n), View.name(Maybe.default(&2, U32, U32.read(value), 0)))), Nil{}, True{}}
+      Step{Nui.with_ui(n, U.Ui.view_pick.back(Nui.ui(n), View.name(Maybe.default(&2, U32, U32.read(value), 0)))), Nil{}, True{}}
     case 1n:
       Step{Nui.with_vw(n, Vw.pick_set(Nui.vw(n), "")), Nil{}, True{}}
     case 2n:
@@ -2786,13 +2827,40 @@ def Row.menu.k(row: Bool, proj: Bool, file: Bool, +n: Nui, +value: String, +x: U
     case False{} False{}:
       Row.menu.f(file, n, value, x, y)
 
+# Review comments (client.bend's Rc): a right-click on the board or the
+# schematic starts a note at that place, "rv-note" with "x\ty\tlayer\titem"
+# (mm in the file's coordinates, the item under the pointer), and puts the
+# keyboard in the note's field
+def Rcw.at(v: V.Vw, +x: U32, +y: U32, +fk: U32, +flip: U32) -> String:
+  match v:
+    case V.Vw{+ss, V.View{+z, +ox, +oy}, _, _, _, _, _, _, _, _, V.Vx{+k, _, _, _, _, _, _, _, _, _, _}}:
+      F32.show(F32.div(F32.sub(U32.to_f32(x), ox), z)) ++ "\t" ++ F32.show(F32.div(F32.sub(U32.to_f32(y), oy), z)) ++ "\t\t"
+        ++ V.Pick.at(ss, V.View{z, ox, oy}, U32.to_f32(x), U32.to_f32(y), U32.or(k, fk), flip)
+
+def Rcw.start(s: Step) -> Step:
+  match s:
+    case Step{n, cs, d}:
+      Step{Nui.with_caret(Nui.with_focus(n, Fld.id("rcnote", "rv-note-send", "")), 0n), cs, d}
+
+# a right press on nothing (Row.menu's None): on the board or schematic,
+# a note at that place; elsewhere nothing
+def Rcw.none(on: Bool, +n: Nui, +x: U32, +y: U32) -> Step:
+  match on:
+    case True{}:
+      Rcw.start(Nui.act(n, "rv-note", Rcw.at(Nui.vw(n), x, y, Nui.lfocus.bits(n), Nui.flip(n))))
+    case False{}:
+      Step{n, Nil{}, False{}}
+
+def Rcw.here(+n: Nui, +x: U32, +y: U32) -> Bool:
+  Bool.and(Bool.and(Nui.in_viewer(n, x), U32.is_ge(y, 52)), U32.is_lt(Vw.kind(Nui.vw(n)), 2))
+
 def Row.menu(m: Maybe<&2, Hit>, +n: Nui, +x: U32, +y: U32) -> Step:
   match m:
     case Some{Hit{_, _, _, _, +action, +value}}:
       Row.menu.k(Bool.and(String.eq(action, "select"), U32.is_lt(x, 264)),
         Bool.and(Bool.or(String.eq(action, "project"), String.eq(action, "look")), U32.is_lt(x, 264)), String.eq(action, "file-open"), n, value, x, y)
     case None{}:
-      Step{n, Nil{}, False{}}
+      Rcw.none(Rcw.here(n, x, y), n, x, y)
 
 # a press on the viewer's own buttons is a click, elsewhere in it a drag
 def Nui.press(viewer: Bool, +n: Nui, +x: U32, +y: U32) -> Step:
@@ -2866,6 +2934,32 @@ def Nui.desk.k(a: U.Act, n: Nui) -> Step:
   match a:
     case U.Act{u, +cs}:
       Step{Nui.with_ui(n, u), Nui.cmds(cs), False{}}
+
+# the person's own input: what keeps a desk in use (core/desk.bend). A
+# redraw, a resize, a drag passing over or the window closing is not: a
+# window left open and focused stops holding the phone's alerts once the
+# person stops using it (law desk_redraw_not_input)
+def Nui.input.one(e: W.WinEv) -> Bool:
+  match e:
+    case W.WExpose{}:
+      False{}
+    case W.WSize{_, _}:
+      False{}
+    case W.WQuit{}:
+      False{}
+    case W.WDragOver{_, _}:
+      False{}
+    case W.WDragLeave{}:
+      False{}
+    case _:
+      True{}
+
+def Nui.input(es: List<&2, W.WinEv>) -> Bool:
+  match es:
+    case Nil{}:
+      False{}
+    case e <> t:
+      Bool.or(Nui.input.one(e), Nui.input(t))
 
 def Nui.desk(+n: Nui, +now: Nat) -> Step:
   Nui.desk.k(U.Ui.desk(Nui.ui(n), Nui.has_focus(n), now), n)
@@ -3045,7 +3139,8 @@ def Nui.event.lb(open: Bool, +n: Nui, e: W.WinEv) -> Step:
 
 # The first-run tour (core/onboard.bend) is modal: Enter and the right
 # arrow go on, the left arrow goes back, Esc ends it (OB.Ob.sym), a press on
-# one of its buttons ("ob-" hits in layout.bend's Lay.tour) acts, and nothing
+# one of its buttons ("ob-" hits in layout.bend's Lay.tour, and the uberbot
+# step's "uber-" choices) acts, and nothing
 # else gets through but the window's own events: a resize, an expose, focus
 # lost or gained (so "@blur" stays true to the window), and the quit.
 # Every physical key (keycode) pressed while the tour is up is held in
@@ -3060,8 +3155,8 @@ def Tour.key(+name: String, +n: Nui) -> Step:
 
 def Tour.press(m: Maybe<&2, Hit>, +n: Nui) -> Step:
   match m:
-    case Some{Hit{_, _, _, _, +a, _}}:
-      Bool.pick(Step, Bool.and(String.starts_with(a, "ob-"), Bool.not(String.eq(a, "ob-scroll"))), Nui.act(n, a, ""), Step{n, Nil{}, False{}})
+    case Some{Hit{_, _, _, _, +a, +v}}:
+      Bool.pick(Step, Bool.or(Bool.and(String.starts_with(a, "ob-"), Bool.not(String.eq(a, "ob-scroll"))), String.starts_with(a, "uber-")), Nui.act(n, a, v), Step{n, Nil{}, False{}})
     case None{}:
       Step{n, Nil{}, False{}}
 

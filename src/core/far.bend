@@ -149,16 +149,30 @@ def Fr.change(+l: String, c: M.Change) -> Maybe<&2, M.Change>:
       Some{M.RoutineDeleted{Fr.id(l, id), at}}
     case M.RoutineFired{+id, at}:
       Some{M.RoutineFired{Fr.id(l, id), at}}
+    case M.RoutinePlan{+id, once, tz, kind, at}:
+      Some{M.RoutinePlan{Fr.id(l, id), once, tz, kind, at}}
+    case M.RoutineSlot{+id, slot, at}:
+      Some{M.RoutineSlot{Fr.id(l, id), slot, at}}
+    case M.RoutineDone{+id, at}:
+      Some{M.RoutineDone{Fr.id(l, id), at}}
+    case M.Reminded{+id, +bot, +thread, text, at}:
+      Some{M.Reminded{Fr.id(l, id), Fr.id(l, bot), Fr.id(l, thread), text, at}}
     case M.MemorySaved{+bot, key, kind, text, tags, at}:
       Some{M.MemorySaved{Fr.id(l, bot), key, kind, text, tags, at}}
     case M.MemoryForgot{+bot, key, at}:
       Some{M.MemoryForgot{Fr.id(l, bot), key, at}}
+    case M.TaskSet{+bot, slug, json, at}:
+      Some{M.TaskSet{Fr.id(l, bot), slug, json, at}}
+    case M.TaskDeleted{+bot, slug, at}:
+      Some{M.TaskDeleted{Fr.id(l, bot), slug, at}}
     case M.SpaceSet{+bot, spec, at}:
       Some{M.SpaceSet{Fr.id(l, bot), spec, at}}
     case M.SpacePageSet{+bot, html, at}:
       Some{M.SpacePageSet{Fr.id(l, bot), html, at}}
     case M.WorkSet{+thread, kind, rows, at}:
       Some{M.WorkSet{Fr.id(l, thread), kind, rows, at}}
+    case M.ThreadLaunched{+id, +by, report, at}:
+      Some{M.ThreadLaunched{Fr.id(l, id), Fr.sender(l, by), report, at}}
     case _:
       None{}
 
@@ -286,9 +300,21 @@ def Fr.shared(+s: M.State, c: M.Change) -> Bool:
       True{}
     case M.RoutineFired{_, _}:
       True{}
+    case M.RoutinePlan{_, _, _, _, _}:
+      True{}
+    case M.RoutineSlot{_, _, _}:
+      True{}
+    case M.RoutineDone{_, _}:
+      True{}
+    case M.Reminded{_, _, _, _, _}:
+      True{}
     case M.MemorySaved{_, _, _, _, _, _}:
       True{}
     case M.MemoryForgot{_, _, _}:
+      True{}
+    case M.TaskSet{_, _, _, _}:
+      True{}
+    case M.TaskDeleted{_, _, _}:
       True{}
     case M.SpaceSet{_, _, _}:
       True{}
@@ -296,6 +322,8 @@ def Fr.shared(+s: M.State, c: M.Change) -> Bool:
       True{}
     case M.WorkSet{+thread, _, _, _}:
       Fr.thread.shared(s, thread)
+    case M.ThreadLaunched{+id, _, _, _}:
+      Fr.thread.shared(s, id)
     case _:
       False{}
 
@@ -376,6 +404,8 @@ def Fr.scope(+s: M.State, c: M.Change) -> String:
       Fr.scope.th(s, thread)
     case M.WorkSet{+thread, _, _, _}:
       Fr.scope.th(s, thread)
+    case M.ThreadLaunched{+id, _, _, _}:
+      Fr.scope.th(s, id)
     case _:
       ""
 
@@ -413,10 +443,10 @@ def Fr.lasts.merge(ks: List<&2, String>, +from: Map<&2, Nat>, m: Map<&2, Nat>) -
 # numbers (lasts), and the newest catalog each link sent (link → its JSON
 # text), for clients that join while a mirror is catching up
 type Cx is Data:
-  Cx{lasts: Map<&2, Nat>, cats: Map<&2, String>}
+  Cx{lasts: Map<&2, Nat>, cats: Map<&2, String>, ub: Map<&2, String>}
 
 def Cx.empty() -> Cx:
-  Cx{Map.new(&2, Nat), Map.new(&2, String)}
+  Cx{Map.new(&2, Nat), Map.new(&2, String), Map.new(&2, String)}
 
 # The catalog: every project this hub shares, so a mirror can list them
 # all at once, in their place, before their threads arrive: its title,
@@ -700,9 +730,9 @@ def Fr.index(es: List<&2, M.Entry>, by: Map<&2, List<&2, M.Entry>>) -> Map<&2, L
 
 def Fr.world(w: BT.World, +prefix: String) -> BT.World:
   match w:
-    case BT.World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
+    case BT.World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
       BT.World{Fr.map(BT.Bot, bs, prefix), rs, ps, hs, Fr.map(BT.Routine, ro, prefix), Fr.map(BT.Mem, ms, prefix), pe,
-        Fr.map(String, sp, prefix), Fr.map(BT.Hops, ho, prefix), Fr.map(Nat, ta, prefix), Fr.map(BT.Page, pg, prefix)}
+        Fr.map(String, sp, prefix), Fr.map(BT.Hops, ho, prefix), Fr.map(Nat, ta, prefix), Fr.map(BT.Page, pg, prefix), Fr.map(String, tk, prefix)}
 
 def Fr.ext.spec(bw: List<&2, M.Ext>, +prefix: String, es: List<&2, M.Entry>) -> List<&2, M.Ext>:
   [M.Ext{Fr.world(M.Ext.world(M.Ext.of(bw)), prefix), Fr.index(List.reverse(&2, M.Entry, es), Map.new(&2, List<&2, M.Entry>))}]
@@ -1601,30 +1631,48 @@ def Fh.feed.add(f: Fh, ls: List<&2, Line>) -> Fh:
 # was committed since on top; its projects' numbers join the commits'
 def Fh.feed.ready(f: Fh, fd: Feed) -> Fh:
   match f fd:
-    case Fh{ms, os, _, e, p, ep, Cx{la, ca}} Feed{ls, +fl}:
-      Fh{ms, os, Some{List.append(&2, Line, e, ls)}, Nil{}, p, ep, Cx{Fr.lasts.merge(Map.keys(&2, Nat, fl), fl, la), ca}}
+    case Fh{ms, os, _, e, p, ep, Cx{la, ca, ub}} Feed{ls, +fl}:
+      Fh{ms, os, Some{List.append(&2, Line, e, ls)}, Nil{}, p, ep, Cx{Fr.lasts.merge(Map.keys(&2, Nat, fl), fl, la), ca, ub}}
 
 # a commit's changes counted into the projects' numbers
 def Fh.lasts.add(f: Fh, cs: List<&2, M.Change>, +seq: Nat, +s: M.State) -> Fh:
   match f:
-    case Fh{ms, os, fd, e, p, ep, Cx{la, ca}}:
-      Fh{ms, os, fd, e, p, ep, Cx{Fr.lasts.add(cs, seq, s, la), ca}}
+    case Fh{ms, os, fd, e, p, ep, Cx{la, ca, ub}}:
+      Fh{ms, os, fd, e, p, ep, Cx{Fr.lasts.add(cs, seq, s, la), ca, ub}}
 
 def Fh.lasts(f: Fh) -> Map<&2, Nat>:
   match f:
-    case Fh{_, _, _, _, _, _, Cx{la, _}}:
+    case Fh{_, _, _, _, _, _, Cx{la, _, _}}:
       la
 
 # the newest catalog a link sent ("" for none), and keeping one
 def Fh.cat(+f: Fh, +link: String) -> String:
   match f:
-    case Fh{_, _, _, _, _, _, Cx{_, ca}}:
+    case Fh{_, _, _, _, _, _, Cx{_, ca, _}}:
       Fr.str.got(Map.get(String, "", ca, link))
 
 def Fh.cat.set(f: Fh, +link: String, +text: String) -> Fh:
   match f:
-    case Fh{ms, os, fd, e, p, ep, Cx{la, +ca}}:
-      Fh{ms, os, fd, e, p, ep, Cx{la, Bool.pick(Map<&2, String>, String.is_empty(text), ca, Map.set(&2, String, ca, link, text))}}
+    case Fh{ms, os, fd, e, p, ep, Cx{la, +ca, ub}}:
+      Fh{ms, os, fd, e, p, ep, Cx{la, Bool.pick(Map<&2, String>, String.is_empty(text), ca, Map.set(&2, String, ca, link, text)), ub}}
+
+# What the uberbot's sync keeps in memory, not in the log (ubersync.bend,
+# server.bend): when the holder was last heard, which machines answered,
+# each link's last version vector and whether a request is out
+def Fh.ub(+f: Fh, +k: String) -> String:
+  match f:
+    case Fh{_, _, _, _, _, _, Cx{_, _, ub}}:
+      Fr.str.got(Map.get(String, "", ub, k))
+
+def Fh.ub.map(f: Fh) -> Map<&2, String>:
+  match f:
+    case Fh{_, _, _, _, _, _, Cx{_, _, ub}}:
+      ub
+
+def Fh.ub.set(f: Fh, +k: String, +v: String) -> Fh:
+  match f:
+    case Fh{ms, os, fd, e, p, ep, Cx{la, ca, ub}}:
+      Fh{ms, os, fd, e, p, ep, Cx{la, ca, Map.set(&2, String, ub, k, v)}}
 
 def Fh.pulling(+f: Fh, +link: String) -> Bool:
   match f:

@@ -1,13 +1,18 @@
 import Base
+import ./locks.bend as LK
 import ./json.bend as J
 import ./model.bend as M
+import ./review.bend as RVW
 import ./codec.bend as C
 import ./hub.bend as B
+import ./deploy.bend as DP
 import ./acp.bend as AC
+import ./msp.bend as MS
 import ./handoff.bend as HD
 import ./bot.bend as BT
 import ./emb.bend as EM
 import ./utf8.bend as U8
+import ./wake.bend as WK
 
 # The Backplane MCP server, as a decider. Each agent session gets its own
 # endpoint (/mcp/<thread>), so every call knows which thread is asking. A
@@ -91,7 +96,7 @@ def Mcp.tools() -> J.Json:
     Tool.def("delegate_task",
       "Delegate one task to a child agent of THIS thread, on any provider/model (see orchestrator_capabilities). The child sees only `prompt` (no conversation history) and works in this thread's directory. Its result arrives in this thread as a message when it finishes, so end your turn instead of polling; use task_status only when you need it mid-turn. Delegation is limited in depth; children of children are allowed up to the limit.",
       [Tool.prop("prompt", "string", "The complete task for the child, with every detail it needs."),
-       Tool.prop("provider", "string", "claude, codex or grok (default: this thread's)."),
+       Tool.prop("provider", "string", "claude, codex, grok, muse or antigravity (default: this thread's)."),
        Tool.prop("model", "string", "Model for the child (default: this thread's)."),
        Tool.prop("title", "string", "Short title for the child thread."),
        Tool.prop("project", "string", "Bots only, and required for them: the project's name or id (project_list); the child is a thread of its own there that the person can follow.")], ["prompt"]),
@@ -104,19 +109,23 @@ def Mcp.tools() -> J.Json:
     Tool.def("machine_list", "List the person's machines linked to this one (this one first), whether each is here or away, and each one's projects with ids you can give thread_launch. A thread elsewhere has an id like <link>~<id>; thread_send, thread_read, thread_wait, thread_interrupt and thread_update take it, so you can work with a thread on any of their machines.", Nil{}, Nil{}),
     Tool.def("thread_read", "Read a thread's timeline in this project (or on another machine, by its <link>~<id>): messages and tool activity, oldest first (the last `limit` entries).",
       [Tool.prop("threadId", "string", "The thread to read."), Tool.prop("limit", "number", "How many entries (default 40).")], ["threadId"]),
-    Tool.def("thread_send", "Send a message to another thread in this project, or on another machine by its <link>~<id>. mode auto (default) starts a turn there, or waits in its queue while one runs; queue always waits for the running turn; steer sends it into the running turn (Codex and Grok restart the turn with it).",
+    Tool.def("thread_send", "Send a message to another thread in this project, or on another machine by its <link>~<id>. mode auto (default) starts a turn there, or waits in its queue while one runs; queue always waits for the running turn; steer sends it into the running turn (Codex, Grok and Muse restart the turn with it).",
       [Tool.prop("threadId", "string", "The thread."), Tool.prop("text", "string", "The message."), Tool.prop("mode", "string", "auto, queue or steer.")], ["threadId", "text"]),
-    Tool.def("thread_launch", "Start a new top-level thread in this project, or in `project` (not a child of this one: the user sees it in the sidebar like their own) with a first message, on any provider/model. Bots must name the project. Answers its threadId; follow it with thread_wait or thread_read. With `machine`, it starts on that other machine of the person's, in its project named by `project` (machine_list).",
-      [Tool.prop("prompt", "string", "The first message, complete."), Tool.prop("title", "string", "A short title (default: from the prompt)."),
-       Tool.prop("provider", "string", "claude, codex or grok (default: the user's default)."), Tool.prop("model", "string", "Model (default: the provider's default)."),
+    Tool.def("thread_launch", "Start a new top-level thread in this project, or in `project` (not a child of this one: the user sees it in the sidebar like their own) with a first message, on any provider/model. Bots must name the project. Answers its threadId. Its reports come to you by themselves, as a message that wakes you: each time its turn ends (completed, failed or interrupted, with its last reply), and at once when it asks the person something; so end your turn instead of polling, and answer it with thread_send. report false launches it without reports; thread_update turns them off or on later. With `machine`, it starts on that other machine of the person's, in its project named by `project` (machine_list).",
+      [Tool.prop("prompt", "string", "The first message, complete."), Tool.prop("title", "string", "A short title (default: from the prompt)."), Tool.prop("report", "boolean", "Whether its turn ends and asks are reported to you (default true)."),
+       Tool.prop("provider", "string", "claude, codex, grok, muse or antigravity (default: the user's default)."), Tool.prop("model", "string", "Model (default: the provider's default)."),
        Tool.prop("project", "string", "The project's name or id (default: this thread's; bots must give one); on another machine its <link>~<id> from machine_list."),
        Tool.prop("machine", "string", "Start it on another machine of the person's, in its project of that name (machine_list).")], ["prompt"]),
-    Tool.def("thread_update", "Rename a thread in this project (this one by default), or with no title have its title written again from its first message.",
-      [Tool.prop("threadId", "string", "The thread (default: this one)."), Tool.prop("title", "string", "The new title; empty to regenerate it.")], Nil{}),
-    Tool.def("thread_wait", "Wait until a thread in this project has finished its turn and has nothing queued, or until timeoutMs passes. Answers its state, whether it is done, and its last reply.",
+    Tool.def("thread_update", "Rename a thread in this project (this one by default), or with no title have its title written again from its first message. With report (and no title), turn the reports of a thread you launched off (false) or on again (true).",
+      [Tool.prop("threadId", "string", "The thread (default: this one)."), Tool.prop("title", "string", "The new title; empty to regenerate it."), Tool.prop("report", "boolean", "For a thread you launched: whether its reports come to you.")], Nil{}),
+    Tool.def("thread_wait", "Wait until a thread in this project has finished its turn and has nothing queued, or until timeoutMs passes. Answers its state, whether it is done, and its last reply. For anything longer than a few minutes use wake_on instead and end your turn.",
       [Tool.prop("threadId", "string", "The thread."), Tool.prop("timeoutMs", "number", "How long to wait at most (default 30000, at most 600000).")], ["threadId"]),
     Tool.def("thread_interrupt", "Stop the running turn of a thread in this project.",
       [Tool.prop("threadId", "string", "The thread.")], ["threadId"]),
+    Tool.def("deploy_restart", "Restart the Backplane hub into a new build safely. Answers at once: the restart waits until no thread is inside a tool call (a build, an edit) and the build lock (/tmp/bp-bend.lock) is free, then goes; every turn it cuts resumes by itself. With stage, a directory holding the built package (backplane, backplane-serve, web/ ...) is swapped into the install first. You are woken after the restart with the new version: end your turn, do not wait.",
+      [Tool.prop("stage", "string", "Absolute path of a staged package to install first (default: the files are already in place)."), Tool.prop("note", "string", "Why, shown to the person.")], Nil{}),
+    Tool.def("deploy_status", "Whether a deploy_restart waits, who asked, and what it still waits for (tool calls in flight, the build lock).", Nil{}, Nil{}),
+    Tool.def("deploy_cancel", "Cancel a waiting deploy_restart.", Nil{}, Nil{}),
     Tool.def("viewer_show",
       "Show a file in the user's Backplane viewer panel: a .kicad_pcb on the Board tab (kind 3d: the board in 3D), a .kicad_sch on the Schematic tab, and any .step/.stp or .glb on the Mech tab, the 3D design tab (the model turned in 3D, the project's parts in mech/ beside it, their renders a tap away), wherever the file is. Use it after changing a design so the user sees the result; the viewer also follows the file live.",
       [Tool.prop("path", "string", "Absolute path of the file."), Tool.prop("kind", "string", "board, schematic, 3d (a board in 3D) or mech (a STEP or GLB); default from the extension.")], ["path"]),
@@ -130,15 +139,31 @@ def Mcp.tools() -> J.Json:
       [Tool.prop("id", "string", "The terminal's id."), Tool.prop("text", "string", "The bytes to send, as text.")], ["id", "text"]),
     Tool.def("terminal_close", "Stop a terminal of this chat (its program is hung up; the user can start it again).",
       [Tool.prop("id", "string", "The terminal's id.")], ["id"]),
-    Tool.def("work_run", "Start long or detached work (a build, a test run, a job on another machine) so Backplane owns it: it survives restarts of Backplane, and when it ends you are woken with its exit code and the end of its output. Use this instead of `&`, nohup, disown or systemd-run, then end your turn; never poll or sleep-wait.",
-      [Tool.prop("command", "string", "The shell command, run in this thread's folder."), Tool.prop("note", "string", "What it is, in a few words."), Tool.prop("timeoutSec", "number", "Give up watching after this long (the work keeps running; the outcome is then unknown).")], ["command"]),
-    Tool.def("work_watch", "Have Backplane watch work that is already running and wake you when it ends: kind unit (a systemd --user unit), pid (a process), or file (a file that will contain the token this call returns). Then end your turn.",
-      [Tool.prop("kind", "string", "unit, pid or file."), Tool.prop("target", "string", "The unit name, the pid, or the file's path."), Tool.prop("note", "string", "What it is."), Tool.prop("timeoutSec", "number", "Give up watching after this long.")], ["kind", "target"]),
+    Tool.def("wake_on", "Subscribe to a local thread, work id, PR or absolute file path. A matching event posts a message in your thread and wakes you; end your turn instead of polling. Thread targets elsewhere are not supported yet.",
+      [Tool.prop("kind", "string", "thread, work, pr or file."), Tool.prop("target", "string", "Thread/work id, owner/repo#N (or #N in a project), or absolute path."),
+       J.KV{"events", J.Json.obj([J.KV{"type", J.Str{"array"}}, J.KV{"items", J.Json.obj([J.KV{"type", J.Str{"string"}}])}])}, Tool.prop("once", "boolean", "Drop after delivery (default true)."), Tool.prop("note", "string", "Include this reminder in the wake message.")], ["kind", "target"]),
+    Tool.def("wake_list", "List your wake subscriptions.", Nil{}, Nil{}),
+    Tool.def("wake_cancel", "Cancel one of your wake subscriptions.", [Tool.prop("id", "string", "The subscription id.")], ["id"]),
+    Tool.def("work_run", "Start long or detached work (a build, a test run, a job on another machine) so Backplane owns it: when it ends you are woken with its exit code and the end of its output; if a restart of Backplane cuts it off you are told it was lost and can start it again. Use this instead of `&`, nohup or disown, then end your turn; never poll or sleep-wait.",
+      [Tool.prop("command", "string", "The shell command, run in this thread's folder."), Tool.prop("lock", "string", "Optional named FIFO lock, held until work ends."), Tool.prop("note", "string", "What it is, in a few words."), Tool.prop("timeoutSec", "number", "Give up watching after this long (the work keeps running; the outcome is then unknown).")], ["command"]),
+    Tool.def("work_watch", "Have Backplane watch work that is already running and wake you when it ends: kind pid (a process) or file (a file that will contain the token this call returns). Then end your turn.",
+      [Tool.prop("kind", "string", "pid or file."), Tool.prop("target", "string", "The pid, or the file's path."), Tool.prop("note", "string", "What it is."), Tool.prop("timeoutSec", "number", "Give up watching after this long.")], ["kind", "target"]),
+    Tool.def("lock_acquire", "Acquire a named FIFO lock without blocking; if queued, end your turn and wait for the grant message.", [Tool.prop("name", "string", "Lock name"), Tool.prop("note", "string", "Purpose")], ["name"]),
+    Tool.def("lock_release", "Release your named lock, granting the next waiter.", [Tool.prop("name", "string", "Lock name")], ["name"]),
+    Tool.def("lock_cancel", "Leave a named lock queue.", [Tool.prop("name", "string", "Lock name")], ["name"]),
+    Tool.def("lock_list", "List named lock holders, timestamps, notes and FIFO waiters.", Nil{}, Nil{}),
     Tool.def("work_list", "List the work Backplane watches for this thread (work_run and work_watch), with each one's state.", Nil{}, Nil{}),
     Tool.def("work_cancel", "Stop work started with work_run (or a watched unit or pid). It shows as cancelling until its end is confirmed.",
       [Tool.prop("id", "string", "The work's id.")], ["id"]),
     Tool.def("work_unwatch", "Stop watching work without stopping it: it may still run, and you will not be told when it ends.",
-      [Tool.prop("id", "string", "The work's id.")], ["id"])]
+      [Tool.prop("id", "string", "The work's id.")], ["id"]),
+    Tool.def("review_comments", "The design review comments on this thread's design (a person's or an agent's, pinned to a place on a board layer or a schematic sheet): the open ones with their replies, and how many are resolved.",
+      Nil{}, Nil{}),
+    Tool.def("review_comment", "Comment on the design, pinned to a place (op add: file, x, y in mm in the file's own coordinates, layer for a board, text), or answer (op add with parent), resolve, reopen, edit or drop a comment by its id. The person sees it pinned in the viewer.",
+      [Tool.prop("op", "string", "add, resolve, reopen, edit or drop."), Tool.prop("id", "string", "The comment (resolve, reopen, edit, drop)."),
+       Tool.prop("parent", "string", "The comment answered (an add that is a reply)."), Tool.prop("file", "string", "The board or schematic, from this thread's folder."),
+       Tool.prop("x", "number", "X in mm."), Tool.prop("y", "number", "Y in mm."), Tool.prop("layer", "string", "A board's layer (F.Cu, B.Silkscreen...)."),
+       Tool.prop("text", "string", "What the comment says.")], ["op"])]
     , List.append(&2, J.Json, Mcp.preview_tools(), [Tool.def("permission_prompt", "Internal to Backplane: asks the user before a tool runs. Do not call it yourself.",
       [Tool.prop("tool_name", "string", "The tool."), Tool.prop("input", "object", "Its input."), Tool.prop("tool_use_id", "string", "The call.")], ["tool_name", "input"])])))}])
 
@@ -390,11 +415,20 @@ def Mcp.delegate.b(bot: Bool, none: Bool, +s: M.State, +now: Nat, +thread: Strin
 
 # a new top-level thread with its first message (it waits for its
 # worktree like any new thread)
-def Mcp.launch.go(+s: M.State, +now: Nat, +th: String, +from: String, +project: String, +env: String, +provider: String, +model: String, +title: String, +prompt: String) -> Res:
+# (the launcher is kept with the thread, so its turn ends and asks are
+# reported back: hub.bend's Launch.tell)
+def Mcp.launch.cs(+c: M.Change, +th: String, +by: String, +report: Bool, +now: Nat) -> List<&2, M.Change>:
+  Bool.pick(List<&2, M.Change>, String.is_empty(by), [c], [c, M.ThreadLaunched{th, by, report, now}])
+
+def Mcp.launch.note(+by: String, +report: Bool) -> String:
+  Bool.pick(String, Bool.and(report, Bool.not(String.is_empty(by))), "Its reports will come to you as messages when its turn ends or it asks the person something. End your turn instead of polling.", "")
+
+def Mcp.launch.go(+s: M.State, +now: Nat, +th: String, +from: String, +by: String, +report: Bool, +project: String, +env: String, +provider: String, +model: String, +title: String, +prompt: String) -> Res:
   +c = {M.ThreadCreated{th, project, title, B.Hub.new.env(M.Scratch.is(project), env), "", B.Hub.new.wt(M.Scratch.is(project), B.Hub.project.root(B.Hub.project(s, project)), th), provider, model, now} : M.Change}
-  +s1 = {M.State.replay([c], s) : M.State}
-  Res{True{}, J.Json.obj([J.KV{"threadId", J.Str{th}}, J.KV{"title", J.Str{title}}, J.KV{"provider", J.Str{provider}}, J.KV{"state", J.Str{"started"}}]),
-    B.Step.before([c], B.Hub.new.outs(M.Scratch.is(project), th, B.Hub.project.root(B.Hub.project(s, project)), env),
+  +cs = {Mcp.launch.cs(c, th, by, report, now) : List<&2, M.Change>}
+  +s1 = {M.State.replay(cs, s) : M.State}
+  Res{True{}, J.Json.obj([J.KV{"threadId", J.Str{th}}, J.KV{"title", J.Str{title}}, J.KV{"provider", J.Str{provider}}, J.KV{"state", J.Str{"started"}}, J.KV{"note", J.Str{Mcp.launch.note(by, report)}}]),
+    B.Step.before(cs, B.Hub.new.outs(M.Scratch.is(project), th, B.Hub.project.root(B.Hub.project(s, project)), env),
       B.Hub.post(s1, now, th, Mcp.from.id(from, B.Hub.id("m", now, B.Hub.seq(s1))), M.User{}, prompt))}
 
 # a project by id or name (any case)
@@ -429,25 +463,30 @@ def Mcp.delegate(+s: M.State, +now: Nat, +thread: String, +p: J.Json) -> Res:
 def Mcp.launch.proj(+s: M.State, +thread: String, +name: String) -> String:
   Bool.pick(String, Bool.or(Mcp.bot(s, thread), Bool.not(String.is_empty(name))), Mcp.project.find(s, name), Mcp.proj(s, thread))
 
-def Mcp.launch.k(empty: Bool, +s: M.State, +now: Nat, +thread: String, +p: J.Json) -> Res:
+def Mcp.launch.k(empty: Bool, +s: M.State, +now: Nat, +thread: String, +by: String, +p: J.Json) -> Res:
   match empty:
     case True{}:
       Res.fail("a prompt is needed")
     case False{}:
-      Mcp.launch.go(s, now, B.Hub.id("t", now, B.Hub.seq(s)), Bool.pick(String, Mcp.bot(s, thread), thread, ""), Mcp.launch.proj(s, thread, J.Json.get_str(p, "project", "")), M.Setting.get(s, "thread.env", "auto"),
+      Mcp.launch.go(s, now, B.Hub.id("t", now, B.Hub.seq(s)), Bool.pick(String, Mcp.bot(s, thread), thread, ""), by, J.Json.get_bool(p, "report", True{}), Mcp.launch.proj(s, thread, J.Json.get_str(p, "project", "")), M.Setting.get(s, "thread.env", "auto"),
         Mcp.or(J.Json.get_str(p, "provider", ""), M.Setting.get(s, "agent.provider", "claude")),
         Mcp.or(J.Json.get_str(p, "model", ""), Bool.pick(String, String.is_empty(J.Json.get_str(p, "provider", "")), M.Setting.get(s, "agent.model", ""), "")),
         Mcp.or(J.Json.get_str(p, "title", ""), B.Hub.title.of(J.Json.get_str(p, "prompt", ""))), J.Json.get_str(p, "prompt", ""))
 
-def Mcp.launch.b(bad: Bool, +s: M.State, +now: Nat, +thread: String, +p: J.Json) -> Res:
+def Mcp.launch.b(bad: Bool, +s: M.State, +now: Nat, +thread: String, +by: String, +p: J.Json) -> Res:
   match bad:
     case True{}:
       Res.fail("name an existing project (project_list shows them)")
     case False{}:
-      Mcp.launch.k(String.is_empty(String.trim(J.Json.get_str(p, "prompt", ""))), s, now, thread, p)
+      Mcp.launch.k(String.is_empty(String.trim(J.Json.get_str(p, "prompt", ""))), s, now, thread, by, p)
+
+# by: who hears its reports (the caller's thread; a caller on another
+# machine as <link>~<thread>, fmcp.bend)
+def Mcp.launch.by(+s: M.State, +now: Nat, +thread: String, +by: String, +p: J.Json) -> Res:
+  Mcp.launch.b(String.is_empty(Mcp.launch.proj(s, thread, J.Json.get_str(p, "project", ""))), s, now, thread, by, p)
 
 def Mcp.launch(+s: M.State, +now: Nat, +thread: String, +p: J.Json) -> Res:
-  Mcp.launch.b(String.is_empty(Mcp.launch.proj(s, thread, J.Json.get_str(p, "project", ""))), s, now, thread, p)
+  Mcp.launch.by(s, now, thread, thread, p)
 
 def Mcp.first.k(e: M.Entry, +th: String, rest: String) -> String:
   match e:
@@ -476,6 +515,34 @@ def Mcp.update.k(ok: Bool, regen: Bool, +s: M.State, +now: Nat, +target: String,
 
 def Mcp.update(+s: M.State, +now: Nat, +thread: String, +target: String, +title: String) -> Res:
   Mcp.update.k(Mcp.same_project(s, thread, target), String.is_empty(String.trim(title)), s, now, target, String.trim(title))
+
+# 0: not given, 1: true, 2: false
+def Mcp.flag(m: Maybe<&2, J.Json>) -> Nat:
+  match m:
+    case Some{J.Flag{True{}}}:
+      1n
+    case Some{J.Flag{False{}}}:
+      2n
+    case Some{J.Str{+v}}:
+      Bool.pick(Nat, String.eq(v, "true"), 1n, Bool.pick(Nat, String.eq(v, "false"), 2n, 0n))
+    case _:
+      0n
+
+# a launched thread's reports turned off or on (its launcher stays)
+def Mcp.report.k(ok: Bool, +s: M.State, +now: Nat, +target: String, +on: Bool) -> Res:
+  match ok:
+    case True{}:
+      Res{True{}, J.Json.obj([J.KV{"threadId", J.Str{target}}, J.KV{"report", J.Flag{on}}]), B.Step{[M.ThreadLaunched{target, M.Launch.by(s, target), on, now}], Nil{}}}
+    case False{}:
+      Res.fail("nobody launched that thread, so it has no reports to change")
+
+def Mcp.update.r(f: Nat, +s: M.State, +now: Nat, +thread: String, +target: String, +title: String) -> Res:
+  match f:
+    case 0n:
+      Mcp.update(s, now, thread, target, title)
+    case _:
+      Bool.pick(Res, String.is_empty(String.trim(title)), Mcp.report.k(Bool.not(String.is_empty(M.Launch.by(s, target))), s, now, target, Nat.is_eq(f, 1n)),
+        Mcp.update(s, now, thread, target, title))
 
 def Mcp.pick(hit: Bool, +text: String, +acc: String) -> String:
   match hit:
@@ -529,7 +596,8 @@ def Mcp.wait.k(ok: Bool, +s: M.State, +target: String) -> Res:
     case False{}:
       Res.fail("that thread is not in this project")
 
-def Mcp.interrupt.k(ok: Bool, run: Bool, +s: M.State, +now: Nat, +target: String) -> Res:
+# (from: the caller, which is not told back that it stopped its own launch)
+def Mcp.interrupt.f(ok: Bool, run: Bool, +s: M.State, +now: Nat, +from: String, +target: String) -> Res:
   match ok run:
     case False{} _:
       Res.fail("that thread is not in this project")
@@ -537,7 +605,10 @@ def Mcp.interrupt.k(ok: Bool, run: Bool, +s: M.State, +now: Nat, +target: String
       Res.ok(J.Json.obj([J.KV{"threadId", J.Str{target}}, J.KV{"state", J.Str{"not running"}}]))
     case True{} True{}:
       Res{True{}, J.Json.obj([J.KV{"threadId", J.Str{target}}, J.KV{"state", J.Str{"interrupted"}}]),
-        B.Retire.stop(s, now, target, Nil{})}
+        B.Retire.stop.f(s, now, target, from, Nil{})}
+
+def Mcp.interrupt.k(ok: Bool, run: Bool, +s: M.State, +now: Nat, +target: String) -> Res:
+  Mcp.interrupt.f(ok, run, s, now, "", target)
 
 # a message to another thread with a follow-up mode; auto is the inbox
 # (it never interrupts, law inbox_never_interrupts)
@@ -558,7 +629,16 @@ def Mcp.send.k(ok: Bool, +s: M.State, +now: Nat, +thread: String, +target: Strin
 
 def Mcp.names() -> List<&2, String>:
   ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "thread_list", "thread_read", "thread_send", "viewer_show",
-   "thread_launch", "thread_update", "thread_wait", "thread_interrupt", "thread_wait_now", "terminal_open", "terminal_send", "terminal_close", "work_run", "work_watch", "work_list", "work_cancel", "work_unwatch"]
+   "thread_launch", "thread_update", "thread_wait", "thread_interrupt", "thread_wait_now", "terminal_open", "terminal_send", "terminal_close", "work_run", "work_watch", "work_list", "work_cancel", "work_unwatch", "review_comments", "review_comment", "wake_on", "wake_list", "wake_cancel", "deploy_restart", "deploy_status", "deploy_cancel", "lock_acquire", "lock_release", "lock_list", "lock_cancel"]
+
+def Mcp.lock.acquire(ok: Bool, +s: M.State, +now: Nat, +thread: String, +a: J.Json) -> Res:
+  match ok:
+    case False{}:
+      Res.fail("lock name must contain 1..64 letters, digits, hyphens or underscores")
+    case True{}:
+      +name = J.Json.get_str(a, "name", "")
+      +st = B.Locks.acquire(s, now, name, LK.LockParty{thread, "thread", thread, J.Json.get_str(a, "note", ""), now, 0n}, J.Json.get_bool(a, "_lockReady", False{}))
+      Res{True{}, B.Locks.answer(M.Locks.get(M.State.replay(B.Queue.changes(st), s), name), thread), st}
 
 # Watched work (hub.bend's Watch.*): work_run, work_watch, work_list,
 # work_cancel, work_unwatch; each answers once its row is stored (the
@@ -577,14 +657,25 @@ def Mcp.work.rows(ls: List<&2, String>) -> List<&2, J.Json>:
     case +l <> t:
       Mcp.work.json(l) <> Mcp.work.rows(t)
 
+def Mcp.work.start.k(locked: Bool, +s: M.State, +now: Nat, +thread: String, +a: J.Json) -> B.Step:
+  match locked:
+    case True{}:
+      B.Locks.work.start(s, now, thread, a, J.Json.get_bool(a, "_lockReady", False{}))
+    case False{}:
+      B.Watch.start(s, now, thread, "run", J.Json.get_str(a, "command", ""), Mcp.or(J.Json.get_str(a, "note", ""), J.Json.get_str(a, "command", "")), Mcp.secs(a))
+
+def Mcp.work.start(+s: M.State, +now: Nat, +thread: String, +a: J.Json) -> B.Step:
+  Mcp.work.start.k(Bool.not(String.is_empty(J.Json.get_str(a, "lock", ""))), s, now, thread, a)
+
 def Mcp.work.run(empty: Bool, +s: M.State, +now: Nat, +thread: String, +a: J.Json) -> Res:
   match empty:
     case True{}:
       Res.fail("command is required")
     case False{}:
-      Res{True{}, J.Json.obj([J.KV{"id", J.Str{B.Watch.id(s, thread)}}, J.KV{"state", J.Str{"launching"}},
-          J.KV{"next", J.Str{"End your turn: you will be woken with the outcome."}}]),
-        B.Watch.start(s, now, thread, "run", J.Json.get_str(a, "command", ""), Mcp.or(J.Json.get_str(a, "note", ""), J.Json.get_str(a, "command", "")), Mcp.secs(a))}
+      +st = Mcp.work.start(s, now, thread, a)
+      +s1 = M.State.replay(B.Queue.changes(st), s)
+      Res{True{}, J.Json.obj([J.KV{"id", J.Str{B.Watch.id(s, thread)}}, J.KV{"state", J.Str{B.Watch.state(B.Watch.find(M.Work.watch(s1, thread), B.Watch.id(s, thread)))}},
+          J.KV{"next", J.Str{"End your turn: you will be woken with the outcome."}}]), st}
 
 def Mcp.work.watch(ok: Bool, +s: M.State, +now: Nat, +thread: String, +a: J.Json) -> Res:
   match ok:
@@ -593,15 +684,77 @@ def Mcp.work.watch(ok: Bool, +s: M.State, +now: Nat, +thread: String, +a: J.Json
           J.KV{"next", J.Str{Bool.pick(String, String.eq(J.Json.get_str(a, "kind", ""), "file"), "Make the work write the token into the file when it is done, then end your turn.", "End your turn: you will be woken when it ends.")}}]),
         B.Watch.start(s, now, thread, J.Json.get_str(a, "kind", ""), J.Json.get_str(a, "target", ""), Mcp.or(J.Json.get_str(a, "note", ""), J.Json.get_str(a, "target", "")), Mcp.secs(a))}
     case False{}:
-      Res.fail("kind must be unit, pid or file")
+      Res.fail("kind must be pid or file")
 
 def Mcp.work.cancel(+l: String, +s: M.State, +now: Nat, +thread: String, +id: String) -> Res:
   Bool.pick(Res, Bool.or(String.is_empty(l), M.Bg.ended(l)), Res.fail("no such work running"),
     Res{True{}, J.Json.obj([J.KV{"id", J.Str{id}}, J.KV{"state", J.Str{"cancelling"}}]), B.Watch.cancel(s, now, thread, id)})
 
 def Mcp.work.unwatch(+l: String, +s: M.State, +now: Nat, +thread: String, +id: String) -> Res:
-  Bool.pick(Res, String.is_empty(l), Res.fail("no such work"),
+  Bool.pick(Res, Bool.or(String.is_empty(l), B.Locks.work.has(s, id)), Res.fail("no such work, or it owns a lock; cancel locked work instead"),
     Res{True{}, J.Json.obj([J.KV{"id", J.Str{id}}, J.KV{"state", J.Str{B.Watch.unwatch.text()}}]), B.Watch.unwatch(s, now, thread, id)})
+
+# Design review comments (core/review.bend): the agent reads them and
+# writes its own, the same Acts a person's make
+def Mcp.review.list(+cs: List<&2, RVW.Comment>) -> Res:
+  Res.ok(J.Json.obj([J.KV{"open", J.Num{Nat.show(RVW.Review.count.open(cs))}}, J.KV{"resolved", J.Num{Nat.show(List.length(&2, RVW.Comment, RVW.Review.resolved(cs)))}},
+    J.KV{"text", J.Str{Bool.pick(String, String.is_empty(RVW.Review.prompt(cs)), "No open comments.", RVW.Review.prompt(cs))}}]))
+
+def Mcp.review.do(ok: Bool, +s: M.State, +now: Nat, +thread: String, +a: J.Json) -> Res:
+  match ok:
+    case True{}:
+      +aid = B.Hub.id("r", now, B.Hub.seq(s))
+      Res{True{}, J.Json.obj([J.KV{"id", J.Str{Bool.pick(String, String.eq(J.Json.get_str(a, "op", ""), "add"), aid, J.Json.get_str(a, "id", ""))}}]),
+        B.Step{[RVW.Review.act(thread, aid, a, B.Hub.provider(B.Hub.thread(s, thread)), now)], Nil{}}}
+    case False{}:
+      Res.fail("review_comment needs op (add, resolve, reopen, edit, drop), text for add and edit, id for the rest")
+
+def Mcp.wake.events(+a: J.Json, +kind: String) -> List<&2, String>:
+  Bool.pick(List<&2, String>, Maybe.is_some(&2, J.Json, J.Json.get(a, "events")), WK.Wake.events(a), WK.Wake.defaults(kind))
+
+def Mcp.wake.on.k(+error: String, +s: M.State, +now: Nat, +by: String, +a: J.Json, +events: List<&2, String>) -> Res:
+  match error:
+    case SNil{}:
+      +id = B.Hub.id("w", now, B.Hub.seq(s))
+      +kind = J.Json.get_str(a, "kind", "")
+      +target = J.Json.get_str(a, "target", "")
+      +once = J.Json.get_bool(a, "once", True{})
+      +note = J.Json.get_str(a, "note", "")
+      Res{True{}, M.Wake.record(id, by, kind, target, events, once, note, now), B.Step{List.append(&2, M.Change, [M.WakeSet{id, by, kind, target, events, once, note, now}], Bool.pick(List<&2, M.Change>, Bool.and(String.eq(kind, "file"), Bool.not(String.is_empty(J.Json.get_str(a, "_baseline", "")))), [M.SettingSet{"wake.base." ++ id, J.Json.get_str(a, "_baseline", ""), now}], Nil{})),
+        Bool.pick(List<&2, B.Out>, String.eq(kind, "file"), [B.WakePoll{Nil{}, [target]}], Nil{})}}
+    case SCon{_, _}:
+      Res.fail(error)
+
+def Mcp.wake.error(+s: M.State, +by: String, +kind: String, +target: String, +events: List<&2, String>) -> String:
+  +error = WK.Wake.error(by, kind, target, events)
+  Bool.pick(String, Bool.not(String.is_empty(error)), error,
+    Bool.pick(String, Bool.and(String.eq(kind, "thread"), Bool.not(B.Hub.owns(s, target))), "no such local target thread", ""))
+
+def Mcp.wake.on(+s: M.State, +now: Nat, +by: String, +a: J.Json) -> Res:
+  +kind = J.Json.get_str(a, "kind", "")
+  +target = J.Json.get_str(a, "target", "")
+  +events = Mcp.wake.events(a, kind)
+  Mcp.wake.on.k(Mcp.wake.error(s, by, kind, target, events), s, now, by, a, events)
+
+def Mcp.wake.cancel.k(ok: Bool, +now: Nat, +id: String) -> Res:
+  match ok:
+    case True{}:
+      Res{True{}, J.Json.obj([J.KV{"id", J.Str{id}}, J.KV{"cancelled", J.Flag{True{}}}]), B.Step{[M.WakeDropped{id, now}], Nil{}}}
+    case False{}:
+      Res.fail("no such wake subscription owned by this thread")
+
+def Mcp.wake.cancel(+s: M.State, +now: Nat, +by: String, +id: String) -> Res:
+  Mcp.wake.cancel.k(Bool.and(Bool.not(String.is_empty(id)), String.eq(J.Json.get_str(WK.Wake.get(s, id), "by", ""), by)), now, id)
+
+# deploy_restart: scheduled at once; the hub restarts when no tool call runs
+# and the build locks are free, and wakes the requester after
+def Mcp.deploy.restart(ok: Bool, +s: M.State, +now: Nat, +thread: String, +a: J.Json) -> Res:
+  match ok:
+    case True{}:
+      Res{True{}, J.Json.obj([J.KV{"state", J.Str{"scheduled"}}, J.KV{"next", J.Str{"Scheduled: the hub restarts when no tool call is running and the build lock is free. You will be woken after it, with the new version. End your turn."}}]),
+        B.Deploy.ask(s, now, Bool.pick(String, String.eq(thread, "deploy"), "", thread), J.Json.get_str(a, "note", ""), J.Json.get_str(a, "stage", ""))}
+    case False{}:
+      Res.fail("stage must be an absolute path")
 
 def Mcp.call.k(i: Nat, +s: M.State, +now: Nat, +thread: String, +models: J.Json, +a: J.Json) -> Res:
   match i:
@@ -619,17 +772,17 @@ def Mcp.call.k(i: Nat, +s: M.State, +now: Nat, +thread: String, +models: J.Json,
       Mcp.read.k(Mcp.same_project(s, thread, J.Json.get_str(a, "threadId", "")), s, J.Json.get_str(a, "threadId", ""),
         Maybe.default(&2, Nat, Nat.read(J.Json.as_raw(J.Json.get(a, "limit"), "40")), 40n))
     case 6n:
-      Mcp.send.k(Mcp.same_project(s, thread, J.Json.get_str(a, "threadId", "")), s, now, thread, J.Json.get_str(a, "threadId", ""), J.Json.get_str(a, "text", ""), J.Json.get_str(a, "mode", ""))
+      Mcp.send.k(Bool.or(Mcp.same_project(s, thread, J.Json.get_str(a, "threadId", "")), B.Lr.may(s, thread, J.Json.get_str(a, "threadId", ""))), s, now, thread, J.Json.get_str(a, "threadId", ""), J.Json.get_str(a, "text", ""), J.Json.get_str(a, "mode", ""))
     case 7n:
       Mcp.view(thread, J.Json.get_str(a, "path", ""), J.Json.get_str(a, "kind", ""))
     case 8n:
       Mcp.launch(s, now, thread, a)
     case 9n:
-      Mcp.update(s, now, thread, Mcp.or(J.Json.get_str(a, "threadId", ""), thread), J.Json.get_str(a, "title", ""))
+      Mcp.update.r(Mcp.flag(J.Json.get(a, "report")), s, now, thread, Mcp.or(J.Json.get_str(a, "threadId", ""), thread), J.Json.get_str(a, "title", ""))
     case 10n:
       Mcp.wait.k(Mcp.same_project(s, thread, J.Json.get_str(a, "threadId", "")), s, J.Json.get_str(a, "threadId", ""))
     case 11n:
-      Mcp.interrupt.k(Mcp.same_project(s, thread, J.Json.get_str(a, "threadId", "")), B.Hub.running(B.Hub.thread(s, J.Json.get_str(a, "threadId", ""))), s, now, J.Json.get_str(a, "threadId", ""))
+      Mcp.interrupt.f(Mcp.same_project(s, thread, J.Json.get_str(a, "threadId", "")), B.Hub.running(B.Hub.thread(s, J.Json.get_str(a, "threadId", ""))), s, now, thread, J.Json.get_str(a, "threadId", ""))
     case 12n:
       Mcp.wait.k(Mcp.same_project(s, thread, J.Json.get_str(a, "threadId", "")), s, J.Json.get_str(a, "threadId", ""))
     case 13n:
@@ -639,15 +792,39 @@ def Mcp.call.k(i: Nat, +s: M.State, +now: Nat, +thread: String, +models: J.Json,
     case 15n:
       Mcp.term.op(String.is_empty(EM.Emb.sum(M.State.mine(s, thread), J.Json.get_str(a, "id", ""))), False{}, thread, J.Json.get_str(a, "id", ""), "")
     case 16n:
-      Mcp.work.run(String.is_empty(String.trim(J.Json.get_str(a, "command", ""))), s, now, thread, a)
+      Mcp.work.run(Bool.or(String.is_empty(String.trim(J.Json.get_str(a, "command", ""))), Bool.and(Bool.not(String.is_empty(J.Json.get_str(a, "lock", ""))), Bool.not(LK.Lock.name.valid(J.Json.get_str(a, "lock", ""))))), s, now, thread, a)
     case 17n:
-      Mcp.work.watch(Nat.is_lt(C.Codec.pos(["unit", "pid", "file"], J.Json.get_str(a, "kind", "")), 3n), s, now, thread, a)
+      Mcp.work.watch(Nat.is_lt(C.Codec.pos(["pid", "file"], J.Json.get_str(a, "kind", "")), 2n), s, now, thread, a)
     case 18n:
       Res.ok(J.Json.obj([J.KV{"work", J.Json.arr(Mcp.work.rows(M.Work.watch(s, thread)))}]))
     case 19n:
       Mcp.work.cancel(B.Watch.find(M.Work.watch(s, thread), J.Json.get_str(a, "id", "")), s, now, thread, J.Json.get_str(a, "id", ""))
     case 20n:
       Mcp.work.unwatch(B.Watch.find(M.Work.watch(s, thread), J.Json.get_str(a, "id", "")), s, now, thread, J.Json.get_str(a, "id", ""))
+    case 21n:
+      Mcp.review.list(RVW.Review.of_state(s, thread))
+    case 23n:
+      Mcp.wake.on(s, now, thread, a)
+    case 24n:
+      Res.ok(J.Json.obj([J.KV{"wakes", J.Json.arr(WK.Wake.list(WK.Wake.by(s, thread), s))}]))
+    case 29n:
+      Mcp.lock.acquire(LK.Lock.name.valid(J.Json.get_str(a, "name", "")), s, now, thread, a)
+    case 30n:
+      Res{True{}, J.Json.obj([J.KV{"released", J.Flag{String.eq(LK.Lock.owner(M.Locks.get(s, J.Json.get_str(a, "name", ""))), thread)}}]), B.Locks.release(s, now, J.Json.get_str(a, "name", ""), thread)}
+    case 31n:
+      Res.ok(J.Json.obj([J.KV{"locks", J.Json.arr(B.Locks.list.go(M.Locks.names(s), s))}]))
+    case 32n:
+      Res{True{}, J.Json.obj([J.KV{"cancelled", J.Flag{True{}}}]), B.Locks.cancel(s, now, J.Json.get_str(a, "name", ""), thread)}
+    case 25n:
+      Mcp.wake.cancel(s, now, thread, J.Json.get_str(a, "id", ""))
+    case 22n:
+      Mcp.review.do(RVW.Review.op.ok(J.Json.get_str(a, "op", ""), a), s, now, thread, a)
+    case 26n:
+      Mcp.deploy.restart(B.Deploy.stage.ok(J.Json.get_str(a, "stage", "")), s, now, thread, a)
+    case 27n:
+      Res.ok(DP.Deploy.status(s))
+    case 28n:
+      Res{True{}, J.Json.obj([J.KV{"state", J.Str{"cancelled"}}]), B.Deploy.cancel(s, now)}
     case _:
       Res.fail("unknown tool")
 
@@ -740,17 +917,20 @@ def Mcp.permission.reply.k(+o: J.Json, +answer: String) -> String:
   Mcp.result(J.Json.get_obj(o, "id"), Perm.text(Perm.verdict.k(C.Codec.pos(["AskUserQuestion"], J.Json.get_str(J.Json.get_obj(J.Json.get_obj(o, "params"), "arguments"), "tool_name", "")),
     J.Json.get_str(J.Json.get_obj(J.Json.get_obj(o, "params"), "arguments"), "tool_name", ""), J.Json.get_obj(J.Json.get_obj(J.Json.get_obj(o, "params"), "arguments"), "input"), answer)))
 
-def Mcp.permission.reply.acp(acp: Bool, +o: J.Json, +body: String, +answer: String) -> String:
-  match acp:
-    case True{}:
+def Mcp.permission.reply.acp(i: Nat, +o: J.Json, +body: String, +answer: String) -> String:
+  match i:
+    case 0n:
       AC.Acp.permit.answer(body, answer)
-    case False{}:
+    case 1n:
+      MS.Msp.decide(body, answer)
+    case _:
       Mcp.permission.reply.k(o, answer)
 
 # the parked reply for a request body, once the user answered: an MCP
-# permission_prompt result, or the ACP response to a Grok request
+# permission_prompt result, the ACP response to a Grok request, or Muse's
+# approval/decide
 def Mcp.permission.reply(+body: String, +answer: String) -> String:
-  Mcp.permission.reply.acp(String.eq(J.Json.get_str(Maybe.default(&2, J.Json, J.Json.parse(body), J.Null{}), "method", ""), "session/request_permission"),
+  Mcp.permission.reply.acp(C.Codec.pos(["session/request_permission", "approval/request"], J.Json.get_str(Maybe.default(&2, J.Json, J.Json.parse(body), J.Null{}), "method", "")),
     Maybe.default(&2, J.Json, J.Json.parse(body), J.Null{}), body, answer)
 
 def Mcp.reply(+id: J.Json, r: Res) -> McpOut:
@@ -811,16 +991,34 @@ def Grok.permit(+s: M.State, +now: Nat, +thread: String, +o: J.Json) -> McpOut:
   Grok.permit.k(Perm.session_ok(M.Asks.all(s), thread, AC.Acp.tool(J.Json.get_obj(o, "params"))), B.Hub.id("q", now, B.Hub.seq(s)), now, thread, o,
     AC.Acp.tool(J.Json.get_obj(o, "params")))
 
-def Mcp.handle.k(grok: Bool, +s: M.State, +now: Nat, +thread: String, +models: J.Json, +version: String, +o: J.Json) -> McpOut:
-  match grok:
+# Muse's approvals
+# ----------------
+# The same for an MSP approval/request (the runner already sent Muse its
+# receipt): the answer is an approval/decide (MS.Msp.decide).
+
+def Muse.permit.k(ok: Bool, +ask: String, +now: Nat, +thread: String, +o: J.Json, +tool: String) -> McpOut:
+  match ok:
     case True{}:
-      Grok.permit(s, now, thread, o)
+      McpOut{MS.Msp.decide(J.Json.show(o), "accept"), B.Step.none(), ""}
     case False{}:
+      McpOut{"", B.Step{[M.AskOpened{ask, thread, "approval", tool, MS.Msp.detail(J.Json.get_obj(o, "params")), "", now}], Nil{}}, ask}
+
+def Muse.permit(+s: M.State, +now: Nat, +thread: String, +o: J.Json) -> McpOut:
+  Muse.permit.k(Perm.session_ok(M.Asks.all(s), thread, MS.Msp.tool(J.Json.get_obj(o, "params"))), B.Hub.id("q", now, B.Hub.seq(s)), now, thread, o,
+    MS.Msp.tool(J.Json.get_obj(o, "params")))
+
+def Mcp.handle.k(i: Nat, +s: M.State, +now: Nat, +thread: String, +models: J.Json, +version: String, +o: J.Json) -> McpOut:
+  match i:
+    case 0n:
+      Grok.permit(s, now, thread, o)
+    case 1n:
+      Muse.permit(s, now, thread, o)
+    case _:
       Mcp.method.k(Mcp.method.pos(J.Json.get_str(o, "method", "")), s, now, thread, models, version, J.Json.get_obj(o, "id"), J.Json.get_obj(o, "params"))
 
 # one JSON-RPC message from an agent of `thread` ("" reply: a notification)
 def Mcp.handle(+s: M.State, +now: Nat, +thread: String, +models: J.Json, +version: String, +o: J.Json) -> McpOut:
-  Mcp.handle.k(String.eq(J.Json.get_str(o, "method", ""), "session/request_permission"), s, now, thread, models, version, o)
+  Mcp.handle.k(C.Codec.pos(["session/request_permission", "approval/request"], J.Json.get_str(o, "method", "")), s, now, thread, models, version, o)
 
 def Mcp.text.k(m: Maybe<&2, J.Json>, +s: M.State, +now: Nat, +thread: String, +models: J.Json, +version: String) -> McpOut:
   match m:

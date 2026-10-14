@@ -35,12 +35,6 @@ struct RootView: View {
                     if let t = model.screen?.tour { TourSheet(model: model, tour: t) }
                 }
                 .task(id: "\(model.screen?.tour != nil)|\(pairing)") { await tourWait() }
-                // the island tapped while several threads work: which to open
-                .confirmationDialog(model.screen?.island.headline ?? "", isPresented: $model.picking, titleVisibility: .visible) {
-                    ForEach(model.screen?.island.lines ?? [], id: \.thread) { l in
-                        Button(l.title.isEmpty ? l.doing : l.title) { model.act("select", l.thread) }
-                    }
-                }
         } else {
             ProgressView()
         }
@@ -325,7 +319,7 @@ private struct ThreadRow: View {
         }
         .contentShape(Rectangle())
         .opacity(row.faded == true ? 0.45 : 1)
-        .onTapGesture { model.navigate([row.id]) }
+        .onTapGesture { model.open(nav: row.id, action: "select", value: row.id, title: row.title) }
         .onLongPressGesture(minimumDuration: 0.4) {
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             model.act("row-menu", row.id)
@@ -372,6 +366,10 @@ struct ProjectsView: View {
             if let f = screen.search {
                 Section { SearchField(model: model, search: f, first: screen.projects.first?.id) }
             }
+            if let u = model.uber(screen) {
+                Section { UberCardRow(model: model, card: u) }
+                if let p = model.plane(screen) { PlaneSections(model: model, plane: p, full: false) }
+            }
             if screen.view == "active" {
                 let rows = screen.active ?? []
                 if rows.isEmpty && screen.settled == nil {
@@ -399,7 +397,7 @@ struct ProjectsView: View {
             if !screen.hubs.isEmpty { BotsSection(model: model, screen: screen) }
         }
         .overlay {
-            if screen.projects.isEmpty && screen.bots.isEmpty && screen.rooms.isEmpty {
+            if screen.projects.isEmpty && screen.bots.isEmpty && screen.rooms.isEmpty && screen.uber == nil {
                 // a hub still catching up has not said what there is yet
                 if let h = screen.hubs.first(where: { (model.conn[$0.key]?.phase ?? .connecting) != .online }), !screen.online {
                     VStack(spacing: 12) {
@@ -644,19 +642,37 @@ struct ThreadDestination: View {
     var body: some View {
         if selected, let b = model.screen?.bot {
             BotDestination(model: model, bot: b)
+        } else if !selected, let b = model.seenBots[id] {
+            BotDestination(model: model, bot: b, live: false, cachedThread: model.seen[id], cachedPlane: model.seenPlanes[id]).allowsHitTesting(false)
         } else if let t = selected ? model.screen?.thread : model.seen[id] {
-            ThreadScreen(model: model, thread: t, live: selected).id(id)
+            ThreadScreen(model: model, thread: t, live: selected).id(id).allowsHitTesting(selected)
         } else {
-            ProgressView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .navigationTitle(title)
-                .navigationBarTitleDisplayMode(.inline)
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(spacing: 12) {
+                    if let d = model.destination, d.nav == id, !d.cat.isEmpty {
+                        BotCat(model: model, key: d.cat, size: 48)
+                    }
+                    Text(title).font(.headline)
+                }
+                ForEach(0..<6) { _ in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Conversation content").font(.headline)
+                        Text("The latest messages will appear here.")
+                    }.redacted(reason: .placeholder)
+                }
+                Spacer()
+            }
+            .padding().frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .allowsHitTesting(false)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
     // the row's title in the list, while nothing of the thread is known
     private var title: String {
         if id == AppModel.making { return "New thread" }
+        if let d = model.destination, d.nav == id { return d.title }
         for p in model.screen?.projects ?? [] {
             for r in p.threads + p.snoozed + p.settled + (p.archived ?? []) where r.id == id { return r.title }
         }
@@ -722,7 +738,7 @@ struct ThreadScreen: View {
                         Color.clear.frame(height: 1).background(GeometryReader { g in
                             Color.clear.onChange(of: g.frame(in: .named("timeline")).minY) { _, y in
                                 markY = y
-                                if y > -400 && keepAt == nil {
+                                if live && y > -400 && keepAt == nil {
                                     keepAt = thread.entries.first?.id
                                     model.act("earlier", "")
                                 }
@@ -777,7 +793,7 @@ struct ThreadScreen: View {
             // a page of entries the timeline does not draw (todo steps, a
             // fold's calls) moves nothing: still at the top, the next is asked for
             .onChange(of: thread.earlier) {
-                guard let k = keepAt, k == thread.entries.first?.id else { return }
+                guard live, let k = keepAt, k == thread.entries.first?.id else { return }
                 keepAt = nil
                 if (thread.earlier ?? 0) > 0 && markY > -400 { keepAt = k; model.act("earlier", "") }
             }
@@ -934,6 +950,7 @@ struct ThreadScreen: View {
             if let v = model.screen?.thread?.viewer {
                 if v.open == "files", let f = v.files { FilesScreen(model: model, viewer: v, page: f) }
                 else if v.open == "image" || v.open == "pdf", let f = v.file { FileScreen(model: model, viewer: v, file: f) }
+                else if v.open == "review", let r = v.review { ReviewScreen(model: model, viewer: v, page: r) }
                 else if v.open == "renders", let p = v.mech { MechScreen(model: model, viewer: v, page: p) } else { PlotScreen(model: model, viewer: v) }
             }
         }
@@ -1074,6 +1091,9 @@ struct TourSheet: View {
                     Text(tour.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            ForEach(tour.choices, id: \.label) { c in
+                Button(c.label) { model.act(c.action, c.value) }.buttonStyle(.bordered)
             }
             HStack {
                 Button(tour.skip) { model.act("ob-skip") }

@@ -29,7 +29,7 @@ const log = join(root, "claude.log");
 mkdirSync(fake);
 writeFileSync(join(fake, "claude"), `#!/bin/sh\nexec ${process.execPath} ${resolve("test/tools/claude_standin.ts")} "$@"\n`);
 chmodSync(join(fake, "claude"), 0o755);
-for (const n of ["codex", "grok"]) {
+for (const n of ["codex", "grok", "muse"]) {
   writeFileSync(join(fake, n), "#!/bin/sh\nexit 1\n");
   chmodSync(join(fake, n), 0o755);
 }
@@ -199,4 +199,7 @@ try {
   if (process.env.KEEP) console.log(root); else rmSync(root, { recursive: true, force: true });
 }
 console.log(fail ? `${fail} failed` : "all ok");
-process.exit(fail ? 1 : 0);
+if (fail) process.exit(1);
+// The subscriptions increment adds its own throwaway hub after the existing
+// background-work wake regression checks above.
+await import("./wake_subscription_e2e.ts");

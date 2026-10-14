@@ -70,8 +70,22 @@ def visit(+u: U.Ui, +url: String) -> String:
 def wanted(+u: U.Ui, +hash: String) -> U.Ui:
   Bool.pick(U.Ui, String.starts_with(hash, "#bot="), U.Want.bot(u, String.drop(hash, 5n)), u)
 
-def act(u: U.Ui, action: String, value: String) -> U.Act:
-  U.Solid.sync(U.Ui.act(u, action, value))
+def Rv.focus.k(a: U.Act, cs: List<&2, U.Cmd>) -> U.Act:
+  match a:
+    case U.Act{+u, +ds}:
+      U.Act{u, List.append(&2, U.Cmd, ds, cs)}
+
+# a layer focus that moved: a comparison's marks follow it (core's rv-bits),
+# before Solid.sync, so the watch it sends is for the comparison's new path
+def Rv.focus(on: Bool, a: U.Act) -> U.Act:
+  match on a:
+    case True{} U.Act{+u, +cs}:
+      Rv.focus.k(U.Ui.act(u, "rv-bits", U32.show(U.Rv.bits(U.Lfocus.kind(u), U.Lfocus.of(u)))), cs)
+    case False{} +x:
+      x
+
+def act(u: U.Ui, +action: String, value: String) -> U.Act:
+  U.Solid.sync(Rv.focus(Bool.or(String.eq(action, "view-layer-pick"), String.eq(action, "view-layer-mode")), U.Ui.act(u, action, value)))
 
 def view(u: U.Ui) -> D.Node:
   V.View.page(u)
@@ -114,7 +128,17 @@ def composer(u: U.Ui) -> D.Node:
 def asks(u: U.Ui) -> D.Node:
   V.View.asks.u(u)
 
+# A value of each Json constructor, for wire.js: bend 2.0.36 tags a module's
+# constructors with their file ("../core/json.Str"), so the JavaScript that
+# builds Json learns the tags from Bend instead of spelling them.
+def json_tags() -> J.Json:
+  J.Arr{J.Item{J.Null{}, J.Item{J.Flag{False{}}, J.Item{J.Num{"0"}, J.Item{J.Str{""}, J.Item{J.Obj{J.Field{"", J.Null{}, J.End{}}}, J.End{}}}}}}}
+
 # the wire's dictionaries, for host.js's own decoder (wire.js)
+# a Node with each Node and Attr constructor, for host.js (same reason)
+def dom_tags() -> D.Node:
+  D.El{"", "", [D.At{"", ""}], [D.Txt{""}]}
+
 def cbor_keys() -> List<&2, String>:
   C.Cbor.keys()
 

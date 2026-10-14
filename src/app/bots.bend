@@ -4,6 +4,8 @@ import ../core/client.bend as U
 import ../core/bot.bend as BT
 import ../core/botui.bend as BU
 import ../core/cron.bend as CR
+import ../core/sched.bend as SC
+import ../core/tz.bend as TZ
 import ../core/cat.bend as CT
 import ../gfx/raster.bend as R
 import ../gfx/draw.bend as D
@@ -13,6 +15,9 @@ import ./layout.bend as L
 import ./cats.bend as CA
 import ./forms.bend as F
 import ./space.bend as SV
+import ./plane.bend as PV
+import ../core/plane.bend as PC
+import ../core/uber.bend as UB
 import ../core/eq.bend as Q
 
 # The bots in the window (docs/bots.md): their cats under the projects in
@@ -71,9 +76,9 @@ def Bv.bform(open: Bool, +ty: L.Ty, +f: F.FS, +c: D.Clip, +y: U32) -> L.Col:
   match open:
     case True{}:
       L.Col{L.Out.all([
-          F.Fm.field(ty, f, c, 12, y, 240, "name", "bot-create", "", "Name"),
+          F.Fm.field(ty, f, c, 12, y, 240, "name", "bot-create", "", U.Bots.name.hint(F.FS.ui(f))),
           F.Fm.area(ty, f, c, 12, (y + 34 : U32), 240, 3n, "persona", "bot-create", "", "Who it is, what it does"),
-          Bv.provs(["claude", "codex", "grok"], ty, Bv.prov(F.FS.ui(f)), c, 12, (y + 112 : U32)),
+          Bv.provs(["claude", "codex", "grok", "muse", "antigravity"], ty, Bv.prov(F.FS.ui(f)), c, 12, (y + 112 : U32)),
           F.Fm.button(ty, c, 12, (y + 146 : U32), "Create", T.Th.accent(), "bot-create", "")]),
         (y + 182 : U32)}
     case False{}:
@@ -122,10 +127,10 @@ def Bv.rrows(rs: List<&2, BU.RRow>, +ty: L.Ty, +c: D.Clip, +y: U32) -> L.Col:
 # what the sidebar's bots section needs, gathered before the sidebar's
 # layout calls it (one value, so the call back holds little)
 type Sd is Data:
-  Sd{ty: L.Ty, cats: Map<&2, CA.CatF>, f: F.FS, ms: Nat, bn: Bool, rn: Bool, rows: List<&2, BU.BRow>, rooms: List<&2, BU.RRow>}
+  Sd{ty: L.Ty, cats: Map<&2, CA.CatF>, f: F.FS, ms: Nat, bn: Bool, rn: Bool, rows: List<&2, BU.BRow>, rooms: List<&2, BU.RRow>, up: Maybe<&2, BU.BRow>, cn: String}
 
 def Bv.sd(+ty: L.Ty, +cats: Map<&2, CA.CatF>, +n: S.Nui) -> Sd:
-  Sd{ty, cats, F.Fm.fs(n), S.Nui.ms_of(n), BU.BU.open(S.Nui.ui(n), "@bnew"), BU.BU.open(S.Nui.ui(n), "@rnew"), BU.BU.rows(S.Nui.ui(n)), BU.BU.rooms(S.Nui.ui(n))}
+  Sd{ty, cats, F.Fm.fs(n), S.Nui.ms_of(n), BU.BU.open(S.Nui.ui(n), "@bnew"), BU.BU.open(S.Nui.ui(n), "@rnew"), BU.BU.rows(S.Nui.ui(n)), BU.BU.rooms(S.Nui.ui(n)), BU.BU.uber(S.Nui.ui(n)), ""}
 
 def Bv.side.k(+ty: L.Ty, +cats: Map<&2, CA.CatF>, +f: F.FS, +ms: Nat, +bn: Bool, +rn: Bool, rows: List<&2, BU.BRow>, rooms: List<&2, BU.RRow>, +c: D.Clip, +y: U32) -> L.Col:
   L.Lay.col.cat(L.Out.cat(L.Out.ops([D.Draw.rect(c, 12, (y + 4 : U32), 240, 1, T.Th.line(), 255)]), Bv.head(ty, c, "Bots", "bot-new", bn, (y + 10 : U32))),
@@ -138,11 +143,40 @@ def Bv.side.k(+ty: L.Ty, +cats: Map<&2, CA.CatF>, +f: F.FS, +ms: Nat, +bn: Bool,
 # the sidebar under the projects: a rule, the cats, then the rooms
 def Bv.side.of(sd: Sd, +c: D.Clip, +y: U32) -> L.Col:
   match sd:
-    case Sd{+ty, +cats, +f, +ms, +bn, +rn, rows, rooms}:
+    case Sd{+ty, +cats, +f, +ms, +bn, +rn, rows, rooms, _, _}:
       Bv.side.k(ty, cats, f, ms, bn, rn, rows, rooms, c, y)
 
 def Bv.side(+ty: L.Ty, +cats: Map<&2, CA.CatF>, +n: S.Nui, +c: D.Clip, +y: U32) -> L.Col:
   Bv.side.of(Bv.sd(ty, cats, n), c, y)
+
+# The uberbot's row above the search field (nothing when there is none):
+# its cat, its name and, under it, what waits on the person and what runs
+def Bv.uber.h() -> U32:
+  48
+
+def Bv.uber.row(+ty: L.Ty, +cats: Map<&2, CA.CatF>, +ms: Nat, r: BU.BRow, +cn: String, +c: D.Clip) -> L.Out:
+  match r:
+    case BU.BRow{_, _, _, +look, +mood, _, +sel, _, _, _}:
+      L.Out{List.concat(&2, R.Op, [
+          Bool.pick(List<&2, R.Op>, sel, [D.Draw.rect(c, 6, 54, 252, 42, T.Th.raise(), 255), D.Draw.rect(c, 6, 54, 2, 42, T.Th.accent(), 255)], Nil{}),
+          CA.Cats.draw(cats, look, mood, ms, c, 14, 60, 28),
+          L.Ty.text(ty, 0n, L.Ty.fit(ty, 0n, BU.BU.row.title(r), 192), c, 50, 54, 24, Bool.pick(U32, sel, T.Th.text(), T.Th.soft())),
+          L.Ty.text(ty, 2n, L.Ty.fit(ty, 2n, Bool.pick(String, String.is_empty(cn), "Nothing needs you", cn), 192), c, 50, 74, 20, Bool.pick(U32, String.is_empty(cn), T.Th.faint(), T.Th.dim()))]),
+        [L.Lay.hit(0, 52, 264, 44, "uber", "")]}
+
+def Bv.uber.out(sd: Sd) -> L.Out:
+  match sd:
+    case Sd{+ty, +cats, _, +ms, _, _, _, _, Some{r}, +cn}:
+      Bv.uber.row(ty, cats, ms, r, cn, D.Clip{0, 52, 264, 100})
+    case _:
+      L.Out.none()
+
+def Bv.uber.top(sd: Sd) -> U32:
+  match sd:
+    case Sd{_, _, _, _, _, _, _, _, Some{_}, _}:
+      Bv.uber.h()
+    case _:
+      0
 
 # the selected cat is also drawn large at the top of its view
 def Bv.warm.sel(sel: Bool, c: Map<&2, CA.CatF>, +look: Nat, +mood: String, +clock: Nat) -> Map<&2, CA.CatF>:
@@ -167,8 +201,15 @@ def Bv.warm.go(rs: List<&2, BU.BRow>, c: Map<&2, CA.CatF>, +clock: Nat) -> Map<&
       +at = Bv.warm.at(mood, clock)
       Bv.warm.go(t, Bv.warm.sel(sel, CA.Cats.warm(c, look, mood, 28, at), look, mood, at), clock)
 
+def Bv.uber.rows(m: Maybe<&2, BU.BRow>) -> List<&2, BU.BRow>:
+  match m:
+    case Some{r}:
+      [r]
+    case None{}:
+      Nil{}
+
 def Bv.warm(+u: U.Ui, c: Map<&2, CA.CatF>, +clock: Nat) -> Map<&2, CA.CatF>:
-  Bv.warm.go(BU.BU.rows(u), c, clock)
+  Bv.warm.go(List.append(&2, BU.BRow, Bv.uber.rows(BU.BU.uber(u)), BU.BU.rows(u)), c, clock)
 
 def Bv.info.nat(+n: S.Nui, +k: String) -> Nat:
   Maybe.default(&2, Nat, Nat.read(U.Ui.info(S.Nui.ui(n), k)), 0n)
@@ -183,10 +224,26 @@ def Bv.idle() -> Nat:
 def Bv.present(+n: S.Nui, +ms: Nat) -> Bool:
   Nat.is_le(Nat.sub(ms, Bv.info.nat(n, "act.at")), Bv.idle())
 
-# frames for the cats: while a shown cat moves, the window has the keys
-# and someone is there
+# a shown cat moves, the window has the keys and someone is there
+def Bv.awake(+n: S.Nui, +ms: Nat) -> Bool:
+  Bool.and(Bool.and(Bool.and(S.Nui.has_focus(n), Bool.not(S.Lbx.on(n))), Bv.present(n, ms)), Bool.or(BU.BU.moving(S.Nui.ui(n)), BU.BU.moving.go(Bv.uber.rows(BU.BU.uber(S.Nui.ui(n))))))
+
+# the cats hold still while the person types, scrolls or points: a cat
+# frame is a whole frame, and 30 of them a second took the cores keys and
+# the sidebar's wheel wait for
+def Bv.calm() -> Nat:
+  1000n
+
+# how long until the cats move again, input last at `at` (0: they may now)
+def Bv.calm.after(+ms: Nat, +at: Nat) -> Nat:
+  Nat.sub(Bv.calm(), Nat.sub(ms, at))
+
+def Bv.calm.left(+n: S.Nui, +ms: Nat) -> Nat:
+  Bv.calm.after(ms, Bv.info.nat(n, "act.at"))
+
+# frames for the cats: awake, and no input for Bv.calm
 def Bv.moving(+n: S.Nui, +ms: Nat) -> Bool:
-  Bool.and(Bool.and(Bool.and(S.Nui.has_focus(n), Bool.not(S.Lbx.on(n))), Bv.present(n, ms)), BU.BU.moving(S.Nui.ui(n)))
+  Bool.and(Bv.awake(n, ms), Nat.is_eq(Bv.calm.left(n, ms), 0n))
 
 # the cats' clock ("cat.clock"): a frame at or past the next cat frame
 # ("cat.due", main.bend's Shell.cats) while a cat moves sets it to its
@@ -291,59 +348,86 @@ def Bv.memory(+ty: L.Ty, +u: U.Ui, +bot: String, +c: D.Clip, +x: U32, +w: U32, +
 def Bv.onoff(+on: Bool) -> String:
   Bool.pick(String, on, "On", "Off")
 
-def Bv.routine(+ty: L.Ty, r: BT.Routine, +now: Nat, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
-  match r:
-    case BT.Routine{+id, _, +name, +cron, +prompt, +on, +last, _, _}:
-      +b1 = L.Lay.button.w(ty, "Delete")
-      +b2 = L.Lay.button.w(ty, "Edit")
-      +b3 = L.Lay.button.w(ty, "Run now")
-      +b4 = L.Lay.button.w(ty, Bv.onoff(on))
-      +bx = {(x + w - 12 - b1 - b2 - b3 - b4 - 18 : U32) : U32}
-      L.Col{L.Out.all([
-          L.Out.ops(L.Lay.box(c, x, y, w, 90, 0, T.Th.panel(), T.Th.line())),
-          L.Out.ops(L.Ty.text(ty, 0n, L.Ty.fit(ty, 0n, name, L.U32.dim((bx - x : U32), 24)), c, (x + 12 : U32), (y + 8 : U32), 28, Bool.pick(U32, on, T.Th.text(), T.Th.dim()))),
-          F.Fm.chip(ty, c, bx, (y + 8 : U32), Bv.onoff(on), on, "routine-toggle", id),
-          F.Fm.button(ty, c, (bx + b4 + 6 : U32), (y + 8 : U32), "Run now", T.Th.soft(), "routine-run", id),
-          F.Fm.button(ty, c, (bx + b4 + b3 + 12 : U32), (y + 8 : U32), "Edit", T.Th.soft(), "routine-edit", id),
-          F.Fm.button(ty, c, (bx + b4 + b3 + b2 + 18 : U32), (y + 8 : U32), "Delete", T.Th.soft(), "routine-delete", id),
-          Bv.faint(ty, c, CR.Cron.describe(cron), (x + 12 : U32), (w - 24 : U32), (y + 40 : U32)),
-          L.Out.ops(L.Ty.text(ty, 2n, L.Ty.fit(ty, 2n, prompt, (w - 24 : U32)), c, (x + 12 : U32), (y + 62 : U32), 20, T.Th.soft()))]),
-        (y + 98 : U32)}
+# a routine's card: its name and buttons, a kind chip (a bell for a
+# reminder) with when it runs, when it is next (in the person's zone) or when
+# it was done, and the prompt
+def Bv.kind.chip(+ty: L.Ty, +c: D.Clip, +x: U32, +y: U32, +kind: String, +label: String, +dim: Bool) -> L.Out:
+  +bell = {String.eq(kind, "reminder") : Bool}
+  +cw = {(L.Lay.button.w(ty, label) + Bool.pick(U32, bell, 18, 0) : U32) : U32}
+  L.Out.ops(List.concat(&2, R.Op, [L.Lay.box(c, x, y, cw, 22, 0, T.Th.raise(), T.Th.line()),
+    Bool.pick(List<&2, R.Op>, bell, L.Lay.icon(ty, "bell", c, (x + 6 : U32), (y + 3 : U32), Bool.pick(U32, dim, T.Th.faint(), T.Th.accent())), Nil{}),
+    L.Ty.text(ty, 2n, label, c, (x + 10 + Bool.pick(U32, bell, 18, 0) : U32), y, 22, Bool.pick(U32, dim, T.Th.faint(), T.Th.dim()))]))
 
-# a routine of a bot elsewhere: its hub runs it on asking, nothing more
-def Bv.routine.far(+ty: L.Ty, r: BT.Routine, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
-  match r:
-    case BT.Routine{+id, _, +name, +cron, +prompt, +on, _, _, _}:
-      +b3 = L.Lay.button.w(ty, "Run now")
-      +bx = {(x + w - 12 - b3 : U32) : U32}
-      L.Col{L.Out.all([
-          L.Out.ops(L.Lay.box(c, x, y, w, 90, 0, T.Th.panel(), T.Th.line())),
-          L.Out.ops(L.Ty.text(ty, 0n, L.Ty.fit(ty, 0n, name, L.U32.dim((bx - x : U32), 24)), c, (x + 12 : U32), (y + 8 : U32), 28, Bool.pick(U32, on, T.Th.text(), T.Th.dim()))),
-          F.Fm.button(ty, c, bx, (y + 8 : U32), "Run now", T.Th.soft(), "routine-run", id),
-          Bv.faint(ty, c, CR.Cron.describe(cron) ++ Bool.pick(String, on, "", " · off"), (x + 12 : U32), (w - 24 : U32), (y + 40 : U32)),
-          L.Out.ops(L.Ty.text(ty, 2n, L.Ty.fit(ty, 2n, prompt, (w - 24 : U32)), c, (x + 12 : U32), (y + 62 : U32), 20, T.Th.soft()))]),
-        (y + 98 : U32)}
+def Bv.chip.w(+ty: L.Ty, +kind: String, +label: String) -> U32:
+  (L.Lay.button.w(ty, label) + Bool.pick(U32, String.eq(kind, "reminder"), 18, 0) : U32)
 
-def Bv.routine.k(own: Bool, +ty: L.Ty, r: BT.Routine, +now: Nat, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
+# the next line: "Next Wed 14 Oct 09:30 EEST · in 3h", the zone when it is not yours; "Done · ..." when done
+def Bv.next.text(+next: String, +rel: String, +zone: String, +done: Bool, +dtext: String, +on: Bool) -> String:
+  Bool.pick(String, done, dtext, Bool.pick(String, String.is_empty(next), Bool.pick(String, on, "", "Off"),
+    "Next " ++ next ++ Bool.pick(String, String.is_empty(rel), "", " · " ++ rel) ++ Bool.pick(String, String.eq(zone, "your time"), "", " · " ++ zone)))
+
+# the line under the chip: a repeating routine's next time, Off, or Done;
+# none for a pending one-time routine, whose time is on the chip's line
+def Bv.routine.gap(w0: SC.SRow, +on: Bool) -> U32:
+  match w0:
+    case SC.SRow{_, _, _, +next, _, _, +done, _}:
+      Bool.pick(U32, Bool.or(done, Bool.or(Bool.not(on), Bool.not(String.is_empty(next)))), 22, 0)
+
+def Bv.routine.lines(+ty: L.Ty, w0: SC.SRow, +prompt: String, +on: Bool, +gap: U32, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Out:
+  match w0:
+    case SC.SRow{+kind, +label, +when, +next, +rel, +zone, +done, +dtext}:
+      +dim = {Bool.or(done, Bool.not(on)) : Bool}
+      L.Out.all([Bv.kind.chip(ty, c, (x + 12 : U32), (y + 34 : U32), kind, label, dim),
+        Bv.faint(ty, c, when, (x + 12 + Bv.chip.w(ty, kind, label) + 8 : U32), (w - 24 - Bv.chip.w(ty, kind, label) - 8 : U32), (y + 36 : U32)),
+        Bv.faint(ty, c, Bv.next.text(next, rel, zone, done, dtext, on), (x + 12 : U32), (w - 24 : U32), (y + 60 : U32)),
+        L.Out.ops(L.Ty.text(ty, 2n, L.Ty.fit(ty, 2n, prompt, (w - 24 : U32)), c, (x + 12 : U32), (y + 60 + gap : U32), 20, T.Th.soft()))])
+
+def Bv.routine.btns(+ty: L.Ty, +done: Bool, +on: Bool, +c: D.Clip, +x: U32, +w: U32, +y: U32, +id: String) -> L.Out:
+  match done:
+    case True{}:
+      F.Fm.button(ty, c, (x + w - 12 - L.Lay.button.w(ty, "Delete") : U32), (y + 8 : U32), "Delete", T.Th.soft(), "routine-delete", id)
+    case False{}:
+      L.Out.all([
+          F.Fm.chip(ty, c, (x + w - 12 - L.Lay.button.w(ty, "Delete") - L.Lay.button.w(ty, "Edit") - L.Lay.button.w(ty, "Run now") - L.Lay.button.w(ty, Bv.onoff(on)) - 18 : U32), (y + 8 : U32), Bv.onoff(on), on, "routine-toggle", id),
+          F.Fm.button(ty, c, (x + w - 12 - L.Lay.button.w(ty, "Delete") - L.Lay.button.w(ty, "Edit") - L.Lay.button.w(ty, "Run now") - 12 : U32), (y + 8 : U32), "Run now", T.Th.soft(), "routine-run", id),
+          F.Fm.button(ty, c, (x + w - 12 - L.Lay.button.w(ty, "Delete") - L.Lay.button.w(ty, "Edit") - 6 : U32), (y + 8 : U32), "Edit", T.Th.soft(), "routine-edit", id),
+          F.Fm.button(ty, c, (x + w - 12 - L.Lay.button.w(ty, "Delete") : U32), (y + 8 : U32), "Delete", T.Th.soft(), "routine-delete", id)])
+
+# buttons: all for a bot here; a bot elsewhere's hub runs it on asking, nothing more
+def Bv.routine.own(own: Bool, +ty: L.Ty, +done: Bool, +on: Bool, +c: D.Clip, +x: U32, +w: U32, +y: U32, +id: String) -> L.Out:
   match own:
     case True{}:
-      Bv.routine(ty, r, now, c, x, w, y)
+      Bv.routine.btns(ty, done, on, c, x, w, y, id)
     case False{}:
-      Bv.routine.far(ty, r, c, x, w, y)
+      F.Fm.button(ty, c, (x + w - 12 - L.Lay.button.w(ty, "Run now") : U32), (y + 8 : U32), "Run now", T.Th.soft(), "routine-run", id)
 
-def Bv.routines(rs: List<&2, BT.Routine>, +ty: L.Ty, +own: Bool, +now: Nat, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
+def Bv.routine.card.k(+ty: L.Ty, +w0: SC.SRow, +r: BT.Routine, +own: Bool, +gap: U32, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
+  L.Col{L.Out.all([
+      L.Out.ops(L.Lay.box(c, x, y, w, (86 + gap : U32), 0, T.Th.panel(), T.Th.line())),
+      L.Out.ops(L.Ty.text(ty, 0n, L.Ty.fit(ty, 0n, BT.Routine.name(r), (w - 40 : U32)), c, (x + 12 : U32), (y + 6 : U32), 28, Bool.pick(U32, Bool.or(BT.Routine.done(r), Bool.not(BT.Routine.on(r))), T.Th.dim(), T.Th.text()))),
+      Bv.routine.own(own, ty, BT.Routine.done(r), BT.Routine.on(r), c, x, w, y, BT.Routine.id(r)),
+      Bv.routine.lines(ty, w0, BT.Routine.prompt(r), BT.Routine.on(r), gap, c, x, w, y)]),
+    (y + 94 + gap : U32)}
+
+def Bv.routine.card(+ty: L.Ty, +w0: SC.SRow, +r: BT.Routine, +own: Bool, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
+  Bv.routine.card.k(ty, w0, r, own, Bv.routine.gap(w0, BT.Routine.on(r)), c, x, w, y)
+
+def Bv.routine.k(own: Bool, +ty: L.Ty, +u: U.Ui, +r: BT.Routine, +now: Nat, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
+  Bv.routine.card(ty, SC.Sched.row(U.Ui.state(u), r, now, 0n, True{}), r, own, c, x, w, y)
+
+def Bv.routines(rs: List<&2, BT.Routine>, +ty: L.Ty, +u: U.Ui, +own: Bool, +now: Nat, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
   match rs:
     case Nil{}:
       L.Col{L.Out.none(), y}
     case r <> t:
-      L.Lay.col.then(Bv.routine.k(own, ty, r, now, c, x, w, y), y2 => Bv.routines(t, ty, own, now, c, x, w, y2))
+      L.Lay.col.then(Bv.routine.k(own, ty, u, r, now, c, x, w, y), y2 => Bv.routines(t, ty, u, own, now, c, x, w, y2))
 
 def Bv.oform(+ty: L.Ty, +f: F.FS, +editing: Bool, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
   L.Col{L.Out.all([
       L.Out.ops(L.Ty.text(ty, 0n, Bool.pick(String, editing, "Change routine", "New routine"), c, x, y, 28, T.Th.soft())),
       F.Fm.field(ty, f, c, x, (y + 32 : U32), U32.min(w, 280), "oname", "routine-save", "", "Name"),
-      F.Fm.field(ty, f, c, (x + U32.min(w, 280) + 8 : U32), (y + 32 : U32), L.U32.dim(w, (U32.min(w, 280) + 8 : U32)), "ocron", "routine-save", "", "When: @daily, 0 9 * * 1-5"),
-      Bv.faint(ty, c, CR.Cron.describe(F.Fm.text(f, "ocron")), (x + U32.min(w, 280) + 8 : U32), w, (y + 62 : U32)),
+      F.Fm.field(ty, f, c, (x + U32.min(w, 280) + 8 : U32), (y + 32 : U32), L.U32.dim(w, (U32.min(w, 280) + 8 : U32)), "ocron", "routine-save", "", "When: daily 09:30, in 2h, tomorrow 9am"),
+      Bv.faint(ty, c, U.Routine.hint(F.FS.ui(f)), x, w, (y + 62 : U32)),
       F.Fm.area(ty, f, c, x, (y + 86 : U32), w, 4n, "oprompt", "routine-save", "", "What it should do each time"),
       F.Fm.button(ty, c, x, (y + 186 : U32), Bool.pick(String, editing, "Save", "Add routine"), T.Th.accent(), "routine-save", "")]),
     (y + 230 : U32)}
@@ -359,9 +443,9 @@ def Bv.oform.if(own: Bool, +ty: L.Ty, +f: F.FS, +editing: Bool, +c: D.Clip, +x: 
 def Bv.rtab(+ty: L.Ty, +f: F.FS, +bot: String, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
   +rs = BU.BU.routines(F.FS.ui(f), bot)
   L.Lay.col.cat(L.Out.cat(Bv.h2(ty, c, "Routines", x, y),
-      Bv.faint(ty, c, Bool.pick(String, List.is_empty(&2, BT.Routine, rs), "None yet. A routine gives it a prompt on a schedule, in this hub's time zone.",
-        "Each runs once when due, even after the hub was off."), x, w, (y + 30 : U32))),
-    L.Lay.col.then(Bv.routines(rs, ty, BU.BU.owns(bot), U.Side.now(F.FS.ui(f)), c, x, w, (y + 60 : U32)), y2 =>
+      Bv.faint(ty, c, Bool.pick(String, List.is_empty(&2, BT.Routine, rs), "None yet. A routine gives it a prompt on a schedule, or once, in your time (" ++ SC.Zone.person(U.Ui.state(F.FS.ui(f))) ++ ").",
+        "Times are your time (" ++ SC.Zone.person(U.Ui.state(F.FS.ui(f))) ++ "). Each runs once when due, even after the hub was off."), x, w, (y + 30 : U32))),
+    L.Lay.col.then(Bv.routines(rs, ty, F.FS.ui(f), BU.BU.owns(bot), U.Side.now(F.FS.ui(f)), c, x, w, (y + 60 : U32)), y2 =>
       Bv.oform.if(BU.BU.owns(bot), ty, f, BU.BU.open(F.FS.ui(f), "@onew"), c, x, w, (y2 + 12 : U32))))
 
 # Webhooks
@@ -508,20 +592,35 @@ def Bv.gown(open: Bool, +ty: L.Ty, +f: F.FS, +c: D.Clip, +x: U32, +w: U32, +y: U
           F.Fm.button(ty, c, (x + L.Lay.button.w(ty, "Save client") + 8 : U32), (y + 36 : U32), "Hide", T.Th.soft(), "bfield", "gown" ++ Bv.sep())]),
         (y + 74 : U32)}
 
-# one signed-in account and its own sign-out
-def Bv.gacct(+ty: L.Ty, +e: String, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
-  +bw = L.Lay.button.w(ty, "Sign out")
-  L.Col{L.Out.all([
-      L.Out.ops(L.Ty.text(ty, 2n, L.Ty.fit(ty, 2n, e, (w - bw - 12 : U32)), c, x, y, 28, T.Th.text())),
-      F.Fm.button(ty, c, (x + w - bw : U32), y, "Sign out", T.Th.soft(), "google", "signout:" ++ e)]),
-    (y + 36 : U32)}
+# the signature editor under an account (client.bend's Bots.sig)
+def Bv.gsig(editing: Bool, +ty: L.Ty, +f: F.FS, +e: String, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
+  match editing:
+    case False{}:
+      L.Col{L.Out.none(), y}
+    case True{}:
+      +ah = F.Fm.area.h(3n)
+      L.Col{L.Out.all([
+          F.Fm.area(ty, f, c, x, y, w, 3n, "gsig", "google", "", "— Sent by Backplane on behalf of " ++ e),
+          F.Fm.button(ty, c, x, (y + ah + 6 : U32), "Save", T.Th.accent(), "google", "sig-save"),
+          F.Fm.button(ty, c, (x + L.Lay.button.w(ty, "Save") + 8 : U32), (y + ah + 6 : U32), "Cancel", T.Th.soft(), "google", "sig-cancel")]),
+        (y + ah + 48 : U32)}
 
-def Bv.gaccts(xs: List<&2, String>, +ty: L.Ty, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
+# one signed-in account, its signature (what mail sent from it ends with) and its own sign-out
+def Bv.gacct(+ty: L.Ty, +f: F.FS, +e: String, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
+  +bw = L.Lay.button.w(ty, "Sign out")
+  +sw = L.Lay.button.w(ty, "Signature")
+  L.Lay.col.then(L.Col{L.Out.all([
+      L.Out.ops(L.Ty.text(ty, 2n, L.Ty.fit(ty, 2n, e, (w - bw - sw - 24 : U32)), c, x, y, 28, T.Th.text())),
+      F.Fm.button(ty, c, (x + w - bw - sw - 8 : U32), y, "Signature", T.Th.soft(), "google", "sig-edit:" ++ e),
+      F.Fm.button(ty, c, (x + w - bw : U32), y, "Sign out", T.Th.soft(), "google", "signout:" ++ e)]),
+    (y + 36 : U32)}, y2 => Bv.gsig(String.eq(U.Bots.sig.editing(F.FS.ui(f)), e), ty, f, e, c, x, w, y2))
+
+def Bv.gaccts(xs: List<&2, String>, +ty: L.Ty, +f: F.FS, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.Col:
   match xs:
     case Nil{}:
       L.Col{L.Out.none(), y}
     case e <> t:
-      L.Lay.col.then(Bv.gacct(ty, e, c, x, w, y), y2 => Bv.gaccts(t, ty, c, x, w, y2))
+      L.Lay.col.then(Bv.gacct(ty, f, e, c, x, w, y), y2 => Bv.gaccts(t, ty, f, c, x, w, y2))
 
 # connect with the shared client or the user's own; every account signed
 # in, each with its own sign-out
@@ -534,7 +633,7 @@ def Bv.google(+ty: L.Ty, +f: F.FS, +c: D.Clip, +x: U32, +w: U32, +y: U32) -> L.C
       Bv.faint(ty, c, Bool.pick(String, String.is_empty(st), "Gmail and Calendar for bots: connect, then allow access. Connect again for another account.", st), x, w, (y + 30 : U32)),
       F.Fm.button(ty, c, x, (y + 58 : U32), add, T.Th.accent(), "google", "connect"),
       F.Fm.button(ty, c, (x + cw + 8 : U32), (y + 58 : U32), "Own client", T.Th.soft(), "bfield", "gown" ++ Bv.sep() ++ "1")]), (y + 96 : U32)}, +y0 =>
-    L.Lay.col.then(Bv.gaccts(U.Bots.google.accts(u), ty, c, x, w, y0), +y1 =>
+    L.Lay.col.then(Bv.gaccts(U.Bots.google.accts(u), ty, f, c, x, w, y0), +y1 =>
     L.Lay.col.then(Bv.gown(String.eq(F.Fm.text(f, "gown"), "1"), ty, f, c, x, w, y1), +y2 =>
       L.Lay.col.then(Bv.gurl.k(String.is_empty(U.Ui.scratch(u, "@google.url")), ty, U.Ui.scratch(u, "@google.url"), c, x, w, y2), +y3 =>
         L.Col{Bv.row2(ty, f, "gpaste", "google", "Browser on another device? Paste where it landed", "Finish", "paste", c, x, w, y3), (y3 + 40 : U32)}))))
@@ -630,12 +729,17 @@ def Bv.pane.k(k: Nat, +ty: L.Ty, +f: F.FS, +b: BT.Bot, +c: D.Clip, +x: U32, +w: 
     case _:
       Bv.stab(ty, f, b, c, x, w, y)
 
-def Bv.bot.k(k: Nat, +ty: L.Ty, +memo: L.TLMemo, +n: S.Nui, +b: BT.Bot, +x0: U32, +x1: U32) -> L.Out:
+def Bv.bot.k(k: Nat, +ty: L.Ty, +memo: L.TLMemo, +pl: PC.Plane, +n: S.Nui, +b: BT.Bot, +x0: U32, +x1: U32) -> L.Out:
   match k:
     case 0n:
       L.Out.hits_below(Bv.hy(), L.Lay.thread.at(ty, memo, n, x0, x1, (Bv.hy() - 52 : U32)))
     case 2n:
       Bv.browser(ty, S.Nui.ui(n), BT.Bot.id(b), BT.Bot.name(b), x0, x1, (Bv.hy() + 16 : U32), S.Nui.height(n))
+    case 7n:
+      +top = {(Bv.hy() + 24 : U32) : U32}
+      +off = Bv.off(S.Nui.ui(n))
+      Bv.pane(PV.Pl.draw(pl, PC.Plane.home(S.Nui.ui(n)), ty, D.Clip{x0, Bv.hy(), x1, S.Nui.height(n)}, (x0 + 24 : U32), (x1 - x0 - 48 : U32), top, off, L.U32.dim(S.Nui.height(n), top), U.Side.now(S.Nui.ui(n))),
+        x0, x1, Bv.hy(), off, S.Nui.height(n))
     case +j:
       +top = {(Bv.hy() + 24 : U32) : U32}
       +off = Bv.off(S.Nui.ui(n))
@@ -644,16 +748,16 @@ def Bv.bot.k(k: Nat, +ty: L.Ty, +memo: L.TLMemo, +n: S.Nui, +b: BT.Bot, +x0: U32
 
 # a bot, here or mirrored from a linked machine: its header, then the tab
 # BU.head picks (the tabs it has)
-def Bv.bot.h(+ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +n: S.Nui, +b: BT.Bot, +hd: BU.Head, +x0: U32, +x1: U32) -> L.Out:
+def Bv.bot.h(+ty: L.Ty, +memo: L.TLMemo, +pl: PC.Plane, +cats: Map<&2, CA.CatF>, +n: S.Nui, +b: BT.Bot, +hd: BU.Head, +x0: U32, +x1: U32) -> L.Out:
   +u = S.Nui.ui(n)
   +st = U.Ui.state(u)
   +th = BT.Bot.thread(b)
-  L.Out.cat(Bv.bot.k(Bv.tab.n(BU.Head.tab(hd)), ty, memo, n, b, x0, x1),
+  L.Out.cat(Bv.bot.k(Bv.tab.n(BU.Head.tab(hd)), ty, memo, pl, n, b, x0, x1),
     Bv.header(ty, cats, u, S.Nui.ms_of(n), hd, " · " ++ M.Thread.provider(U.Ui.thread(st, th)),
       Bv.stop(Bv.busy(U.Side.status(st, U.Ui.thread(st, th))), ty, Bv.right(BU.Head.viewer(hd), ty, x1)), x0, x1))
 
-def Bv.bot(+ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +n: S.Nui, +b: BT.Bot, +x0: U32, +x1: U32) -> L.Out:
-  Bv.bot.h(ty, memo, cats, n, b, BU.BU.head.bot(S.Nui.ui(n), b), x0, x1)
+def Bv.bot(+ty: L.Ty, +memo: L.TLMemo, +pl: PC.Plane, +cats: Map<&2, CA.CatF>, +n: S.Nui, +b: BT.Bot, +x0: U32, +x1: U32) -> L.Out:
+  Bv.bot.h(ty, memo, pl, cats, n, b, BU.BU.head.bot(S.Nui.ui(n), b), x0, x1)
 
 # Rooms and bots elsewhere
 # ------------------------
@@ -673,9 +777,44 @@ type PW is Data:
   PW{ok: Bool, text: String, lines: List<&2, String>}
   PWGroup{posts: List<&2, Map<&2, PW>>}
   PWKeys{keys: List<&2, String>}
+  PWPlane{key: String, plane: PC.Plane}
+  PWCounts{key: String, words: String}
 
 def Bv.wraps.none() -> Map<&2, PW>:
   Map.new(&2, PW)
+
+# the plane kept with the posts (Bv.plane.keep), an empty one before any
+def Bv.plane.none() -> PC.Plane:
+  PC.Plane{Nil{}, Nil{}, Nil{}, Nil{}, Nil{}, Nil{}, 0n, Nil{}, Nil{}}
+
+def Bv.plane.got(p: PW) -> PC.Plane:
+  match p:
+    case PWPlane{_, pl}:
+      pl
+    case _:
+      Bv.plane.none()
+
+def Bv.plane.snd(r: Map<&2, PW> & PW) -> PW:
+  (_, p) = r
+  p
+
+def Bv.plane.get(+ws: Map<&2, PW>) -> PC.Plane:
+  Bv.plane.got(Bv.plane.snd(Map.get(PW, PWPlane{"", Bv.plane.none()}, ws, "@plane")))
+
+# the sidebar row's count, kept beside the plane (it is not built unless the Status tab shows)
+def Bv.plane.words.got(p: PW) -> String:
+  match p:
+    case PWCounts{_, w}:
+      w
+    case _:
+      ""
+
+def Bv.plane.words(+ws: Map<&2, PW>) -> String:
+  Bv.plane.words.got(Bv.plane.snd(Map.get(PW, PWCounts{"", ""}, ws, "@plane.n")))
+
+def Bv.sd.w(+ty: L.Ty, +cats: Map<&2, CA.CatF>, +n: S.Nui, +ws: Map<&2, PW>) -> Sd:
+  Sd{ty, cats, F.Fm.fs(n), S.Nui.ms_of(n), BU.BU.open(S.Nui.ui(n), "@bnew"), BU.BU.open(S.Nui.ui(n), "@rnew"), BU.BU.rows(S.Nui.ui(n)), BU.BU.rooms(S.Nui.ui(n)),
+    BU.BU.uber(S.Nui.ui(n)), Bv.plane.words(ws)}
 
 def Bv.wrap.key(+id: String, +w: U32) -> String:
   id ++ ":" ++ U32.show(w)
@@ -829,7 +968,7 @@ def Bv.view(v: BU.View, +ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +ws
     case BU.VThread{}:
       None{}
     case BU.VBot{b}:
-      Some{Bv.bot(ty, memo, cats, n, b, 264, x1)}
+      Some{Bv.bot(ty, memo, Bv.plane.get(ws), cats, n, b, 264, x1)}
     case BU.VRoom{r}:
       Some{Bv.room(ty, ws, n, r, 264, x1)}
     case BU.VRemote{+id}:
@@ -849,13 +988,13 @@ def Bv.main.w(+ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +ws: Map<&2, 
 def Bv.main(+ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +n: S.Nui) -> Maybe<&2, L.Out>:
   Bv.main.w(ty, memo, cats, Bv.wraps.none(), n)
 
-def Bv.frame.k(sd: Sd, +ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +ws: Map<&2, PW>, +n: S.Nui) -> L.Out:
-  L.Lay.frame.x(ty, memo, n, c => y => Bv.side.of(sd, c, y), Bv.main.w(ty, memo, cats, ws, n))
+def Bv.frame.k(+sd: Sd, +ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +ws: Map<&2, PW>, +n: S.Nui) -> L.Out:
+  L.Lay.frame.u(ty, memo, n, Bv.uber.out(sd), Bv.uber.top(sd), c => y => Bv.side.of(sd, c, y), Bv.main.w(ty, memo, cats, ws, n))
 
 # the whole window, topmost first, with the bots in it; ws: the posts
 # wrapped for the frame before (Bv.wraps)
 def Bv.frame.w(+ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +ws: Map<&2, PW>, +n: S.Nui) -> L.Out:
-  Bv.frame.k(Bv.sd(ty, cats, n), ty, memo, cats, ws, n)
+  Bv.frame.k(Bv.sd.w(ty, cats, n, ws), ty, memo, cats, ws, n)
 
 # (every post wrapped afresh)
 def Bv.frame(+ty: L.Ty, +memo: L.TLMemo, +cats: Map<&2, CA.CatF>, +n: S.Nui) -> L.Out:
@@ -930,5 +1069,53 @@ def Bv.wraps.k(settings: Bool, +ty: L.Ty, +n: S.Nui, +ws: Map<&2, PW>) -> Map<&2
     case False{}:
       Bv.wraps.of(BU.BU.view(S.Nui.ui(n)), S.Nui.ui(n), ws, ty, Bv.pane.w(264, L.Lay.x1(n)))
 
+# The status plane, built again only when its key changes (core's
+# Plane.key) and only while there is an uberbot
+def Bv.plane.key.of(p: PW) -> String:
+  match p:
+    case PWPlane{+k, _}:
+      k
+    case _:
+      ""
+
+def Bv.plane.key(+ws: Map<&2, PW>) -> String:
+  Bv.plane.key.of(Bv.plane.snd(Map.get(PW, PWPlane{"", Bv.plane.none()}, ws, "@plane")))
+
+# whether the uberbot's Status tab is up (the only place the plane is drawn)
+def Bv.plane.shown.k(v: BU.View, +u: U.Ui) -> Bool:
+  match v:
+    case BU.VBot{+b}:
+      String.eq(BU.BU.tab.of(u, BT.Bot.id(b)), "status")
+    case _:
+      False{}
+
+def Bv.plane.shown(+u: U.Ui) -> Bool:
+  Bv.plane.shown.k(BU.BU.view(u), u)
+
+def Bv.plane.build(shown: Bool, +u: U.Ui) -> PC.Plane:
+  match shown:
+    case True{}:
+      PC.Plane.of(u, U.Side.now(u))
+    case False{}:
+      Bv.plane.none()
+
+def Bv.plane.keep.k(same: Bool, +ws: Map<&2, PW>, +u: U.Ui, +key: String) -> Map<&2, PW>:
+  match same:
+    case True{}:
+      ws
+    case False{}:
+      Map.set(&2, PW, Map.set(&2, PW, ws, "@plane", PWPlane{key, Bv.plane.build(Bv.plane.shown(u), u)}), "@plane.n", PWCounts{key, PC.Plane.tally.words(u, U.Side.now(u))})
+
+def Bv.plane.keep(+ws: Map<&2, PW>, +u: U.Ui) -> Map<&2, PW>:
+  +key = {PC.Plane.key(u, U.Side.now(u)) ++ Bool.pick(String, Bv.plane.shown(u), "|s", "") : String}
+  Bv.plane.keep.k(String.eq(Bv.plane.key(ws), key), ws, u, key)
+
+def Bv.plane.refresh(m: Maybe<&2, BU.BRow>, +ws: Map<&2, PW>, +u: U.Ui) -> Map<&2, PW>:
+  match m:
+    case Some{_}:
+      Bv.plane.keep(ws, u)
+    case None{}:
+      ws
+
 def Bv.wraps(+ty: L.Ty, +n: S.Nui, +ws: Map<&2, PW>) -> Map<&2, PW>:
-  Bv.wraps.k(U.Ui.flag(S.Nui.ui(n), "settings"), ty, n, ws)
+  Bv.plane.refresh(BU.BU.uber(S.Nui.ui(n)), Bv.wraps.k(U.Ui.flag(S.Nui.ui(n), "settings"), ty, n, ws), S.Nui.ui(n))

@@ -22,7 +22,7 @@ type Hook is Data:
   Hook{id: String, bot: String, name: String, created: Nat, revoked: Bool, last: Nat, count: Nat}
 
 type Routine is Data:
-  Routine{id: String, bot: String, name: String, cron: String, prompt: String, on: Bool, last: Nat, created: Nat, deleted: Bool}
+  Routine{id: String, bot: String, name: String, cron: String, prompt: String, on: Bool, last: Nat, created: Nat, deleted: Bool, once: Nat, tz: String, kind: String, done: Bool, slot: Nat}
 
 type Mem is Data:
   Mem{bot: String, key: String, kind: String, text: String, tags: String, created: Nat, updated: Nat}
@@ -52,7 +52,8 @@ type World is Data:
     spaces: Map<&2, String>,
     hops: Map<&2, Hops>,
     talk: Map<&2, Nat>,
-    pages: Map<&2, Page>
+    pages: Map<&2, Page>,
+    tasks: Map<&2, String>
   }
 
 # the value half of a Map.get
@@ -61,7 +62,7 @@ def Got(-V: Data, r: Map<&2, V> & V) -> V:
   v
 
 def World.empty() -> World:
-  World{Map.new(&2, Bot), Map.new(&2, Room), Nil{}, Map.new(&2, Hook), Map.new(&2, Routine), Map.new(&2, Mem), Map.new(&2, Peer), Map.new(&2, String), Map.new(&2, Hops), Map.new(&2, Nat), Map.new(&2, Page)}
+  World{Map.new(&2, Bot), Map.new(&2, Room), Nil{}, Map.new(&2, Hook), Map.new(&2, Routine), Map.new(&2, Mem), Map.new(&2, Peer), Map.new(&2, String), Map.new(&2, Hops), Map.new(&2, Nat), Map.new(&2, Page), Map.new(&2, String)}
 
 def Bot.blank(id: String) -> Bot:
   Bot{id, "", "", 0n, "", 0n, True{}}
@@ -73,7 +74,7 @@ def Hook.blank(id: String) -> Hook:
   Hook{id, "", "", 0n, True{}, 0n, 0n}
 
 def Routine.blank(id: String) -> Routine:
-  Routine{id, "", "", "", "", False{}, 0n, 0n, True{}}
+  Routine{id, "", "", "", "", False{}, 0n, 0n, True{}, 0n, "", "", False{}, 0n}
 
 def Peer.blank(id: String) -> Peer:
   Peer{id, "", "", 0n, True{}}
@@ -83,12 +84,12 @@ def Peer.blank(id: String) -> Peer:
 
 def World.bots.set(w: World, +id: String, b: Bot) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{Map.set(&2, Bot, bs, id, b), rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{Map.set(&2, Bot, bs, id, b), rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}
 
 def World.bot(+w: World, +id: String) -> Bot:
   match w:
-    case World{bs, _, _, _, _, _, _, _, _, _, _}:
+    case World{bs, _, _, _, _, _, _, _, _, _, _, _}:
       Got(Bot, Map.get(Bot, Bot.blank(id), bs, id))
 
 def Bot.keep.k(+was: String, +now: String) -> String:
@@ -113,13 +114,13 @@ def World.bot_deleted(+w: World, +id: String) -> World:
 
 def World.room(+w: World, +id: String) -> Room:
   match w:
-    case World{_, rs, _, _, _, _, _, _, _, _, _}:
+    case World{_, rs, _, _, _, _, _, _, _, _, _, _}:
       Got(Room, Map.get(Room, Room.blank(id), rs, id))
 
 def World.rooms.set(w: World, +id: String, r: Room) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{bs, Map.set(&2, Room, rs, id, r), ps, hs, ro, ms, pe, sp, ho, ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, Map.set(&2, Room, rs, id, r), ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}
 
 # members travel as one line each
 def Room.members.of(s: String) -> List<&2, String>:
@@ -149,8 +150,8 @@ def World.talked(ta: Map<&2, Nat>, +from: String, +at: Nat) -> Map<&2, Nat>:
 
 def World.posted(w: World, p: Post) -> World:
   match w p:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg} Post{i, r, +f, t, h, +at}:
-      World{bs, rs, Post{i, r, f, t, h, at} <> ps, hs, ro, ms, pe, sp, ho, World.talked(ta, f, at), pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk} Post{i, r, +f, t, h, +at}:
+      World{bs, rs, Post{i, r, f, t, h, at} <> ps, hs, ro, ms, pe, sp, ho, World.talked(ta, f, at), pg, tk}
 
 # whether a post with this id is already in: a walk from the newest that
 # stops at the first hit (a message sent again after a dropped link)
@@ -165,18 +166,18 @@ def Post.has.go(ps: List<&2, Post>, +id: String, found: Bool) -> Bool:
 
 def World.has_post(w: World, +id: String) -> Bool:
   match w:
-    case World{_, _, ps, _, _, _, _, _, _, _, _}:
+    case World{_, _, ps, _, _, _, _, _, _, _, _, _}:
       Post.has.go(ps, id, False{})
 
 def World.hook(+w: World, +id: String) -> Hook:
   match w:
-    case World{_, _, _, hs, _, _, _, _, _, _, _}:
+    case World{_, _, _, hs, _, _, _, _, _, _, _, _}:
       Got(Hook, Map.get(Hook, Hook.blank(id), hs, id))
 
 def World.hooks.set(w: World, +id: String, h: Hook) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{bs, rs, ps, Map.set(&2, Hook, hs, id, h), ro, ms, pe, sp, ho, ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, Map.set(&2, Hook, hs, id, h), ro, ms, pe, sp, ho, ta, pg, tk}
 
 def World.hook_set.k(w: World, +id: String, bot: String, name: String, revoked: Bool, +at: Nat, old: Hook) -> World:
   match old:
@@ -196,13 +197,13 @@ def World.hook_hit(+w: World, +id: String, +at: Nat) -> World:
 
 def World.routine(+w: World, +id: String) -> Routine:
   match w:
-    case World{_, _, _, _, ro, _, _, _, _, _, _}:
+    case World{_, _, _, _, ro, _, _, _, _, _, _, _}:
       Got(Routine, Map.get(Routine, Routine.blank(id), ro, id))
 
 def World.routines.set(w: World, +id: String, r: Routine) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{bs, rs, ps, hs, Map.set(&2, Routine, ro, id, r), ms, pe, sp, ho, ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, Map.set(&2, Routine, ro, id, r), ms, pe, sp, ho, ta, pg, tk}
 
 def Routine.clock(was_on: Bool, on: Bool, +last: Nat, +at: Nat) -> Nat:
   match was_on on:
@@ -211,10 +212,18 @@ def Routine.clock(was_on: Bool, on: Bool, +last: Nat, +at: Nat) -> Nat:
     case _ _:
       last
 
+# a routine's slot (the zone's wall clock at its last fire) restarts with its clock
+def Routine.slot.keep(was_on: Bool, on: Bool, +slot: Nat) -> Nat:
+  match was_on on:
+    case False{} True{}:
+      0n
+    case _ _:
+      slot
+
 def World.routine_set.k(w: World, +id: String, bot: String, name: String, cron: String, prompt: String, +on: Bool, +at: Nat, old: Routine) -> World:
   match old:
-    case Routine{_, +ob, _, _, _, was_on, +last, +created, +deleted}:
-      World.routines.set(w, id, Routine{id, Bot.keep.k(ob, bot), name, cron, prompt, on, Routine.clock(Bool.and(was_on, Bool.not(deleted)), on, last, at), Bool.pick(Nat, deleted, at, created), False{}})
+    case Routine{_, +ob, _, _, _, +was_on, +last, +created, +deleted, +once, tz, kind, done, +slot}:
+      World.routines.set(w, id, Routine{id, Bot.keep.k(ob, bot), name, cron, prompt, on, Routine.clock(Bool.and(was_on, Bool.not(deleted)), on, last, at), Bool.pick(Nat, deleted, at, created), False{}, once, tz, kind, done, Routine.slot.keep(Bool.and(was_on, Bool.not(deleted)), on, slot)})
 
 # made or edited; a routine's clock starts when it is made or turned on, so
 # a new routine never fires for times before it existed
@@ -223,19 +232,45 @@ def World.routine_set(+w: World, +id: String, bot: String, name: String, cron: S
 
 def World.routine_deleted.k(w: World, +id: String, r: Routine) -> World:
   match r:
-    case Routine{i, b, n, c, p, o, l, cr, _}:
-      World.routines.set(w, id, Routine{i, b, n, c, p, o, l, cr, True{}})
+    case Routine{i, b, n, c, p, o, l, cr, _, on1, tz, kd, dn, sl}:
+      World.routines.set(w, id, Routine{i, b, n, c, p, o, l, cr, True{}, on1, tz, kd, dn, sl})
 
 def World.routine_deleted(+w: World, +id: String) -> World:
   World.routine_deleted.k(w, id, World.routine(w, id))
 
 def World.routine_fired.k(w: World, +id: String, +at: Nat, r: Routine) -> World:
   match r:
-    case Routine{i, b, n, c, p, o, _, cr, d}:
-      World.routines.set(w, id, Routine{i, b, n, c, p, o, at, cr, d})
+    case Routine{i, b, n, c, p, o, _, cr, d, on1, tz, kd, dn, sl}:
+      World.routines.set(w, id, Routine{i, b, n, c, p, o, at, cr, d, on1, tz, kd, dn, sl})
 
 def World.routine_fired(+w: World, +id: String, +at: Nat) -> World:
   World.routine_fired.k(w, id, at, World.routine(w, id))
+
+# RoutinePlan: when it fires once (0: repeats), in which zone, what it does;
+# a plan makes a routine pending again
+def World.routine_plan.k(w: World, +id: String, +once: Nat, tz: String, kind: String, r: Routine) -> World:
+  match r:
+    case Routine{i, b, n, c, p, o, l, cr, d, _, _, _, _, _}:
+      World.routines.set(w, id, Routine{i, b, n, c, p, o, l, cr, d, once, tz, kind, False{}, 0n})
+
+def World.routine_plan(+w: World, +id: String, +once: Nat, tz: String, kind: String) -> World:
+  World.routine_plan.k(w, id, once, tz, kind, World.routine(w, id))
+
+def World.routine_slot.k(w: World, +id: String, +slot: Nat, r: Routine) -> World:
+  match r:
+    case Routine{i, b, n, c, p, o, l, cr, d, on1, tz, kd, dn, _}:
+      World.routines.set(w, id, Routine{i, b, n, c, p, o, l, cr, d, on1, tz, kd, dn, slot})
+
+def World.routine_slot(+w: World, +id: String, +slot: Nat) -> World:
+  World.routine_slot.k(w, id, slot, World.routine(w, id))
+
+def World.routine_done.k(w: World, +id: String, r: Routine) -> World:
+  match r:
+    case Routine{i, b, n, c, p, o, l, cr, d, on1, tz, kd, _, sl}:
+      World.routines.set(w, id, Routine{i, b, n, c, p, o, l, cr, d, on1, tz, kd, True{}, sl})
+
+def World.routine_done(+w: World, +id: String) -> World:
+  World.routine_done.k(w, id, World.routine(w, id))
 
 def Mem.at(+bot: String, +key: String) -> String:
   bot ++ "/" ++ key
@@ -245,18 +280,18 @@ def Mem.blank(bot: String, key: String) -> Mem:
 
 def World.mem(+w: World, +bot: String, +key: String) -> Mem:
   match w:
-    case World{_, _, _, _, _, ms, _, _, _, _, _}:
+    case World{_, _, _, _, _, ms, _, _, _, _, _, _}:
       Got(Mem, Map.get(Mem, Mem.blank(bot, key), ms, Mem.at(bot, key)))
 
 def World.mems.put(w: World, +k: String, m: Mem) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{bs, rs, ps, hs, ro, Map.set(&2, Mem, ms, k, m), pe, sp, ho, ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, Map.set(&2, Mem, ms, k, m), pe, sp, ho, ta, pg, tk}
 
 def World.mems.del(w: World, +k: String) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{bs, rs, ps, hs, ro, Map.del(&2, Mem, ms, k), pe, sp, ho, ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, Map.del(&2, Mem, ms, k), pe, sp, ho, ta, pg, tk}
 
 def World.mem_saved.k(w: World, +bot: String, +key: String, kind: String, text: String, tags: String, +at: Nat, old: Mem) -> World:
   match old:
@@ -272,23 +307,77 @@ def World.mem_forgot(w: World, +bot: String, +key: String) -> World:
 
 def World.space_set(w: World, +bot: String, spec: String) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{bs, rs, ps, hs, ro, ms, pe, Map.set(&2, String, sp, bot, spec), ho, ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, ms, pe, Map.set(&2, String, sp, bot, spec), ho, ta, pg, tk}
 
 def World.spage_set(w: World, +bot: String, html: String, +at: Nat) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, Map.set(&2, Page, pg, bot, Page{html, at})}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, Map.set(&2, Page, pg, bot, Page{html, at}), tk}
+
+# Browser task skills (task.bend): a bot's tasks as JSON text, keyed
+# "<bot>/<slug>"; TaskSet replaces one, TaskDeleted drops it
+type TRow is Data:
+  TRow{slug: String, json: String}
+
+def Task.at(+bot: String, +slug: String) -> String:
+  bot ++ "/" ++ slug
+
+def World.task_set(w: World, +bot: String, +slug: String, json: String) -> World:
+  match w:
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, Map.set(&2, String, tk, Task.at(bot, slug), json)}
+
+def World.task_del(w: World, +bot: String, +slug: String) -> World:
+  match w:
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, Map.del(&2, String, tk, Task.at(bot, slug))}
+
+def World.task.get(w: World, +bot: String, +slug: String) -> String:
+  match w:
+    case World{_, _, _, _, _, _, _, _, _, _, _, tk}:
+      Got(String, Map.get(String, "", tk, Task.at(bot, slug)))
+
+def World.task.some(json: String) -> Maybe<&2, String>:
+  match json:
+    case SNil{}:
+      None{}
+    case _:
+      Some{json}
+
+# one task's JSON, if the bot has it
+def World.task(+w: World, +bot: String, +slug: String) -> Maybe<&2, String>:
+  World.task.some(World.task.get(w, bot, slug))
+
+def World.tasks_of.put(hit: Bool, k: String, v: String, rest: List<&2, TRow>, +pre: String) -> List<&2, TRow>:
+  match hit:
+    case True{}:
+      TRow{String.drop(k, String.length(pre)), v} <> rest
+    case False{}:
+      rest
+
+def World.tasks_of.go(kvs: List<&2, Sigma<&2, &2, String, _ => String>>, +pre: String) -> List<&2, TRow>:
+  match kvs:
+    case Nil{}:
+      Nil{}
+    case (+k, v) <> t:
+      World.tasks_of.put(String.starts_with(k, pre), k, v, World.tasks_of.go(t, pre), pre)
+
+# a bot's tasks, (slug, json), by slug
+def World.tasks_of(+w: World, +bot: String) -> List<&2, TRow>:
+  match w:
+    case World{_, _, _, _, _, _, _, _, _, _, _, tk}:
+      World.tasks_of.go(Map.to_list(&2, String, tk), bot ++ "/")
 
 def World.peer(+w: World, +id: String) -> Peer:
   match w:
-    case World{_, _, _, _, _, _, pe, _, _, _, _}:
+    case World{_, _, _, _, _, _, pe, _, _, _, _, _}:
       Got(Peer, Map.get(Peer, Peer.blank(id), pe, id))
 
 def World.peers.set(w: World, +id: String, p: Peer) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg}:
-      World{bs, rs, ps, hs, ro, ms, Map.set(&2, Peer, pe, id, p), sp, ho, ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, ms, Map.set(&2, Peer, pe, id, p), sp, ho, ta, pg, tk}
 
 def World.peer_set.k(w: World, +id: String, name: String, url: String, revoked: Bool, +at: Nat, old: Peer) -> World:
   match old:
@@ -356,13 +445,13 @@ def Hop.wakes(hs: List<&2, Nat>, c: Hops) -> Hops:
 
 def World.woke(w: World, +bot: String, busy: Bool, +hop: Nat) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, +ho, ta, pg}:
-      World{bs, rs, ps, hs, ro, ms, pe, sp, Map.set(&2, Hops, ho, bot, Hop.woke(busy, Got(Hops, Map.get(Hops, Hops{0n, 0n, False{}}, ho, bot)), hop)), ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, +ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, ms, pe, sp, Map.set(&2, Hops, ho, bot, Hop.woke(busy, Got(Hops, Map.get(Hops, Hops{0n, 0n, False{}}, ho, bot)), hop)), ta, pg, tk}
 
 def World.taken.id(w: World, +bot: String) -> World:
   match w:
-    case World{bs, rs, ps, hs, ro, ms, pe, sp, +ho, ta, pg}:
-      World{bs, rs, ps, hs, ro, ms, pe, sp, Map.set(&2, Hops, ho, bot, Hop.taken(Got(Hops, Map.get(Hops, Hops{0n, 0n, False{}}, ho, bot)))), ta, pg}
+    case World{bs, rs, ps, hs, ro, ms, pe, sp, +ho, ta, pg, tk}:
+      World{bs, rs, ps, hs, ro, ms, pe, sp, Map.set(&2, Hops, ho, bot, Hop.taken(Got(Hops, Map.get(Hops, Hops{0n, 0n, False{}}, ho, bot)))), ta, pg, tk}
 
 # Reading
 # -------
@@ -405,7 +494,7 @@ def Bot.before(a: Bot, b: Bot) -> Bool:
 # the live bots, oldest first
 def World.bots(+w: World) -> List<&2, Bot>:
   match w:
-    case World{bs, _, _, _, _, _, _, _, _, _, _}:
+    case World{bs, _, _, _, _, _, _, _, _, _, _, _}:
       List.sort(~Bot, ~Bot.before, List.filter(~Bot, ~Bot.live, Map.values(&2, Bot, bs)))
 
 def Bot.here(b: Bot) -> Bool:
@@ -418,7 +507,7 @@ def Bot.here(b: Bot) -> Bool:
 # mentions and pickers reach as name@machine instead
 def World.bots.here(+w: World) -> List<&2, Bot>:
   match w:
-    case World{bs, _, _, _, _, _, _, _, _, _, _}:
+    case World{bs, _, _, _, _, _, _, _, _, _, _, _}:
       List.sort(~Bot, ~Bot.before, List.filter(~Bot, ~Bot.here, Map.values(&2, Bot, bs)))
 
 def Bot.named.k(+b: Bot, +name: String) -> Bool:
@@ -527,7 +616,7 @@ def Room.is_dm(r: Room) -> Bool:
 # the live group rooms (not direct messages)
 def World.rooms(+w: World) -> List<&2, Room>:
   match w:
-    case World{_, rs, _, _, _, _, _, _, _, _, _}:
+    case World{_, rs, _, _, _, _, _, _, _, _, _, _}:
       List.filter(~Room, ~(r => Bool.and(Room.live(r), Bool.not(Room.is_dm(r)))), Map.values(&2, Room, rs))
 
 def Room.has(ms: List<&2, String>, +x: String) -> Bool:
@@ -590,8 +679,28 @@ def Post.in.go(ps: List<&2, Post>, +room: String, +n: Nat, acc: List<&2, Post>) 
 # a room's last n posts, oldest first
 def World.posts(+w: World, +room: String, +n: Nat) -> List<&2, Post>:
   match w:
-    case World{_, _, ps, _, _, _, _, _, _, _, _}:
+    case World{_, _, ps, _, _, _, _, _, _, _, _, _}:
       Post.in.go(ps, room, n, Nil{})
+
+def Post.unread.add(new: Bool, +n: Nat) -> Nat:
+  Bool.pick(Nat, new, 1n+n, n)
+
+# a walk from the newest post, stopping after the first at or before `seen`
+# (the older ones are older still); `done` says the last one was
+def Post.unread.go(ps: List<&2, Post>, done: Bool, +room: String, +seen: Nat, +n: Nat) -> Nat:
+  match ps done:
+    case Nil{} _:
+      n
+    case +p <> +t True{}:
+      n
+    case Post{_, +r, +f, _, _, +at} <> t False{}:
+      Post.unread.go(t, Nat.is_le(at, seen), room, seen, Post.unread.add(Bool.and(Nat.is_gt(at, seen), Bool.and(String.eq(r, room), Bool.not(String.eq(f, "you")))), n))
+
+# the posts in a room newer than `seen` that the person did not write
+def World.unread(+w: World, +room: String, +seen: Nat) -> Nat:
+  match w:
+    case World{_, _, ps, _, _, _, _, _, _, _, _, _}:
+      Post.unread.go(ps, False{}, room, seen, 0n)
 
 def Post.touches(p: Post, +bot: String) -> Bool:
   match p:
@@ -610,18 +719,18 @@ def Post.by.go(ps: List<&2, Post>, +bot: String, +n: Nat, acc: List<&2, Post>) -
 # a bot's last n posts in any room (sent, or in a direct room of its own)
 def World.posts_of(+w: World, +bot: String, +n: Nat) -> List<&2, Post>:
   match w:
-    case World{_, _, ps, _, _, _, _, _, _, _, _}:
+    case World{_, _, ps, _, _, _, _, _, _, _, _, _}:
       Post.by.go(ps, bot, n, Nil{})
 
 def World.space(+w: World, +bot: String) -> String:
   match w:
-    case World{_, _, _, _, _, _, _, sp, _, _, _}:
+    case World{_, _, _, _, _, _, _, sp, _, _, _, _}:
       Got(String, Map.get(String, "", sp, bot))
 
 # a bot's space page (empty html, at 0, when it has none)
 def World.spage(+w: World, +bot: String) -> Page:
   match w:
-    case World{_, _, _, _, _, _, _, _, _, _, pg}:
+    case World{_, _, _, _, _, _, _, _, _, _, pg, _}:
       Got(Page, Map.get(Page, Page{"", 0n}, pg, bot))
 
 def Page.html(p: Page) -> String:
@@ -636,12 +745,12 @@ def Page.at(p: Page) -> Nat:
 
 def World.hop(+w: World, +bot: String) -> Nat:
   match w:
-    case World{_, _, _, _, _, _, _, _, ho, _, _}:
+    case World{_, _, _, _, _, _, _, _, ho, _, _, _}:
       Hops.now(Got(Hops, Map.get(Hops, Hops{0n, 0n, False{}}, ho, bot)))
 
 def World.talked_at(+w: World, +bot: String) -> Nat:
   match w:
-    case World{_, _, _, _, _, _, _, _, _, ta, pg}:
+    case World{_, _, _, _, _, _, _, _, _, ta, pg, _}:
       Got(Nat, Map.get(Nat, 0n, ta, bot))
 
 def Hook.live(h: Hook) -> Bool:
@@ -670,22 +779,82 @@ def Hook.of.go(hs: List<&2, Hook>, +bot: String) -> List<&2, Hook>:
 
 def World.hooks(+w: World, +bot: String) -> List<&2, Hook>:
   match w:
-    case World{_, _, _, hs, _, _, _, _, _, _, _}:
+    case World{_, _, _, hs, _, _, _, _, _, _, _, _}:
       List.filter(~Hook, ~Hook.live, Hook.of.go(Map.values(&2, Hook, hs), bot))
 
 def Routine.live(r: Routine) -> Bool:
   match r:
-    case Routine{_, _, _, _, _, _, _, _, d}:
+    case Routine{_, _, _, _, _, _, _, _, d, _, _, _, _, _}:
       Bool.not(d)
 
 def Routine.bot(r: Routine) -> String:
   match r:
-    case Routine{_, b, _, _, _, _, _, _, _}:
+    case Routine{_, b, _, _, _, _, _, _, _, _, _, _, _, _}:
       b
+
+def Routine.id(r: Routine) -> String:
+  match r:
+    case Routine{i, _, _, _, _, _, _, _, _, _, _, _, _, _}:
+      i
+
+def Routine.cron(r: Routine) -> String:
+  match r:
+    case Routine{_, _, _, c, _, _, _, _, _, _, _, _, _, _}:
+      c
+
+def Routine.last(r: Routine) -> Nat:
+  match r:
+    case Routine{_, _, _, _, _, _, l, _, _, _, _, _, _, _}:
+      l
+
+def Routine.name(r: Routine) -> String:
+  match r:
+    case Routine{_, _, n, _, _, _, _, _, _, _, _, _, _, _}:
+      n
+
+def Routine.prompt(r: Routine) -> String:
+  match r:
+    case Routine{_, _, _, _, p, _, _, _, _, _, _, _, _, _}:
+      p
+
+def Routine.on(r: Routine) -> Bool:
+  match r:
+    case Routine{_, _, _, _, _, o, _, _, _, _, _, _, _, _}:
+      o
+
+def Routine.created(r: Routine) -> Nat:
+  match r:
+    case Routine{_, _, _, _, _, _, _, c, _, _, _, _, _, _}:
+      c
+
+def Routine.once(r: Routine) -> Nat:
+  match r:
+    case Routine{_, _, _, _, _, _, _, _, _, o, _, _, _, _}:
+      o
+
+def Routine.tz(r: Routine) -> String:
+  match r:
+    case Routine{_, _, _, _, _, _, _, _, _, _, t, _, _, _}:
+      t
+
+def Routine.kind(r: Routine) -> String:
+  match r:
+    case Routine{_, _, _, _, _, _, _, _, _, _, _, k, _, _}:
+      k
+
+def Routine.done(r: Routine) -> Bool:
+  match r:
+    case Routine{_, _, _, _, _, _, _, _, _, _, _, _, d, _}:
+      d
+
+def Routine.slot(r: Routine) -> Nat:
+  match r:
+    case Routine{_, _, _, _, _, _, _, _, _, _, _, _, _, s}:
+      s
 
 def World.routines.all(+w: World) -> List<&2, Routine>:
   match w:
-    case World{_, _, _, _, ro, _, _, _, _, _, _}:
+    case World{_, _, _, _, ro, _, _, _, _, _, _, _}:
       List.filter(~Routine, ~Routine.live, Map.values(&2, Routine, ro))
 
 def Routine.of.go(rs: List<&2, Routine>, +bot: String) -> List<&2, Routine>:
@@ -705,7 +874,7 @@ def Peer.live(p: Peer) -> Bool:
 
 def World.peers(+w: World) -> List<&2, Peer>:
   match w:
-    case World{_, _, _, _, _, _, pe, _, _, _, _}:
+    case World{_, _, _, _, _, _, pe, _, _, _, _, _}:
       List.filter(~Peer, ~Peer.live, Map.values(&2, Peer, pe))
 
 # Linked machines by name
@@ -930,7 +1099,7 @@ def Mem.of.go(ms: List<&2, Mem>, +bot: String) -> List<&2, Mem>:
 # a bot's memory, newest first
 def World.mems(+w: World, +bot: String) -> List<&2, Mem>:
   match w:
-    case World{_, _, _, _, _, ms, _, _, _, _, _}:
+    case World{_, _, _, _, _, ms, _, _, _, _, _, _}:
       List.sort(~Mem, ~Mem.newer, Mem.of.go(Map.values(&2, Mem, ms), bot))
 
 def Mem.line(m: Mem) -> String:

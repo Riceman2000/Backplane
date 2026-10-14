@@ -8,7 +8,7 @@ import SwiftUI
 private let sep = "\u{1f}"
 
 // how a mood looks next to a cat
-private func moodTint(_ mood: String) -> Color {
+func moodTint(_ mood: String) -> Color {
     switch mood {
     case "wait": .orange
     case "work", "talk": .green
@@ -19,7 +19,7 @@ private func moodTint(_ mood: String) -> Color {
     }
 }
 
-private struct MoodDot: View {
+struct MoodDot: View {
     let mood: String
 
     var body: some View {
@@ -49,7 +49,7 @@ struct BotsSection: View {
     var body: some View {
         Section {
             ForEach(screen.bots) { b in
-                Button { model.act(b.act ?? (b.remote ? "remote" : "bot"), b.id) } label: {
+                Button { model.open(nav: b.nav ?? "", action: b.act ?? (b.remote ? "remote" : "bot"), value: b.id, title: b.name, cat: b.cat, kind: b.remote ? "remote" : "bot") } label: {
                     HStack(spacing: 12) {
                         BotCat(model: model, key: b.cat, size: 36)
                         VStack(alignment: .leading, spacing: 2) {
@@ -69,7 +69,7 @@ struct BotsSection: View {
                 .opacity(b.mood == "away" ? 0.5 : 1)
             }
             ForEach(screen.rooms) { r in
-                Button { model.act("room", r.id) } label: {
+                Button { model.open(nav: r.nav ?? "", action: "room", value: r.id, title: r.name, kind: "room") } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "bubble.left.and.bubble.right").frame(width: 36).foregroundStyle(.secondary)
                         Text(r.name).foregroundStyle(.primary)
@@ -118,7 +118,7 @@ struct NewBotSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Name", text: $name)
+                    TextField(form.hint, text: $name)
                         .onChange(of: name) { _, t in model.field("name", t) }
                     TextField("Persona", text: $persona, axis: .vertical)
                         .lineLimit(3...10)
@@ -185,10 +185,13 @@ struct NewRoomSheet: View {
 struct BotDestination: View {
     let model: AppModel
     let bot: BotView
+    var live = true
+    var cachedThread: ThreadView?
+    var cachedPlane: PlaneModel?
 
     var body: some View {
         switch bot.kind {
-        case "bot": BotScreen(model: model, bot: bot)
+        case "bot": BotScreen(model: model, bot: bot, live: live, cachedThread: cachedThread, cachedPlane: cachedPlane)
         case "room": TalkScreen(model: model, bot: bot, field: "rpost", send: "room-post")
         default: TalkScreen(model: model, bot: bot, field: "rtext", send: "remote-send")
         }
@@ -222,6 +225,9 @@ private struct BotHeader: View {
 struct BotScreen: View {
     let model: AppModel
     let bot: BotView
+    var live = true
+    var cachedThread: ThreadView?
+    var cachedPlane: PlaneModel?
 
     var body: some View {
         content
@@ -254,6 +260,8 @@ struct BotScreen: View {
 
     @ViewBuilder private var content: some View {
         switch bot.tab ?? "chat" {
+        case "status":
+            StatusTab(model: model, plane: live ? model.screen.flatMap { model.plane($0) } : cachedPlane).navigationTitle(bot.name).navigationBarTitleDisplayMode(.inline)
         case "space":
             if let p = bot.page {
                 SpacePage(model: model, page: p).navigationTitle(bot.name).navigationBarTitleDisplayMode(.inline)
@@ -271,7 +279,7 @@ struct BotScreen: View {
         case "settings":
             if let s = bot.settings { SettingsTab(model: model, bot: bot, settings: s).navigationTitle(bot.name).navigationBarTitleDisplayMode(.inline) }
         default:
-            if let t = model.screen?.thread { ThreadScreen(model: model, thread: t) }
+            if let t = live ? model.screen?.thread : cachedThread { ThreadScreen(model: model, thread: t, live: live) }
         }
     }
 }
@@ -328,6 +336,24 @@ private struct MemoryTab: View {
     }
 }
 
+// a routine's kind chip icon: a bell for a reminder, a clock for a one-time
+// routine, else repeat
+private func routineIcon(_ kind: String?) -> String {
+    switch kind {
+    case "reminder": return "bell"
+    case "once": return "clock"
+    default: return "repeat"
+    }
+}
+
+// "Next Tue 14 Oct 09:30 EEST · in 3h", with the routine's zone when it is not the person's
+private func routineNext(_ next: String, _ rel: String?, _ zone: String?) -> String {
+    var s = "Next " + next
+    if let rel = rel, !rel.isEmpty { s += " · " + rel }
+    if let zone = zone, zone != "your time" { s += " · " + zone }
+    return s
+}
+
 private struct RoutinesTab: View {
     let model: AppModel
     let items: [BotRoutine]
@@ -340,18 +366,32 @@ private struct RoutinesTab: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(r.name).font(.subheadline.weight(.semibold))
-                        Text(r.when).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            // kind chip: Repeats, Once, or Reminder with a bell
+                            Label(r.label ?? "Repeats", systemImage: routineIcon(r.kind))
+                                .font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Color.secondary.opacity(0.15))
+                            Text(r.when).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        }
+                        if r.done == true {
+                            Text(r.doneText ?? "Done").font(.caption).foregroundStyle(.secondary)
+                        } else if let n = r.next, !n.isEmpty {
+                            Text(routineNext(n, r.rel, r.zone))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         Text(r.prompt).font(.caption).lineLimit(2)
-                        if !r.last.isEmpty { Text("last " + r.last).font(.caption2).foregroundStyle(.secondary) }
                     }
                     Spacer()
-                    Toggle("On", isOn: Binding(get: { r.on }, set: { _ in model.act("routine-toggle", r.id) })).labelsHidden()
+                    if r.done != true {
+                        Toggle("On", isOn: Binding(get: { r.on }, set: { _ in model.act("routine-toggle", r.id) })).labelsHidden()
+                    }
                 }
+                .opacity(r.done == true ? 0.55 : 1)
                 .contentShape(.rect)
                 .onTapGesture { model.act("routine-edit", r.id) }
                 .swipeActions {
                     Button("Delete", role: .destructive) { model.act("routine-delete", r.id) }
-                    Button("Run") { model.act("routine-run", r.id) }.tint(.indigo)
+                    if r.done != true { Button("Run") { model.act("routine-run", r.id) }.tint(.indigo) }
                 }
             }
         }
@@ -373,7 +413,7 @@ private struct RoutineSheet: View {
             Form {
                 TextField("Name", text: $name).onChange(of: name) { _, t in model.field("oname", t) }
                 Section {
-                    TextField("0 9 * * 1-5", text: $cron)
+                    TextField("daily 09:30 · tomorrow 9am · in 2h", text: $cron)
                         .font(.body.monospaced())
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -381,7 +421,7 @@ private struct RoutineSheet: View {
                 } header: {
                     Text("When")
                 } footer: {
-                    Text("Cron, @daily, every 15m, weekdays 08:00")
+                    Text((form.hint ?? "").isEmpty ? "A schedule (daily 09:30, every 15m, cron) or a time (tomorrow 9am, in 2h)" : form.hint!)
                 }
                 Section("Prompt") {
                     TextField("What to do", text: $prompt, axis: .vertical)
@@ -449,6 +489,7 @@ private struct SettingsTab: View {
     @State private var gid = ""
     @State private var gsecret = ""
     @State private var gpaste = ""
+    @State private var gsig = ""
     @State private var purl = ""
     @State private var join = ""
     @State private var deleting = false
@@ -464,11 +505,25 @@ private struct SettingsTab: View {
             Section {
                 if !settings.google.status.isEmpty { Text(settings.google.status).font(.subheadline) }
                 ForEach(settings.google.accounts, id: \.self) { a in
-                    HStack {
-                        Text(a).lineLimit(1)
-                        Spacer()
-                        Button("Sign out", role: .destructive) { model.act("google", "signout:" + a) }
-                            .buttonStyle(.borderless)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(a).lineLimit(1)
+                            Spacer()
+                            Button("Signature") { model.act("google", "sig-edit:" + a) }
+                                .buttonStyle(.borderless)
+                            Button("Sign out", role: .destructive) { model.act("google", "signout:" + a) }
+                                .buttonStyle(.borderless)
+                        }
+                        if settings.google.sigFor == a {
+                            TextField("— Sent by Backplane on behalf of " + a, text: $gsig, axis: .vertical)
+                                .lineLimit(2...6)
+                                .onChange(of: gsig) { _, t in model.field("gsig", t) }
+                                .onAppear { gsig = settings.google.sigText }
+                            HStack {
+                                Button("Save") { model.act("google", "sig-save") }.buttonStyle(.borderless)
+                                Button("Cancel") { model.act("google", "sig-cancel") }.buttonStyle(.borderless)
+                            }
+                        }
                     }
                 }
                 Button(settings.google.accounts.isEmpty ? "Connect Google" : "Add account") { GoogleLoop.shared.start { model.act($0, $1) } }

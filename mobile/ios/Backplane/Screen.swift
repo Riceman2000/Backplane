@@ -113,6 +113,8 @@ struct Entry: Decodable, Identifiable {
     let value: String?
     // a terminal in the chat (kind "emb"): its item in the thread's embs
     let key: String?
+    // a reminder (kind "reminder"): when, in the person's zone
+    let when: String?
 }
 
 // what the agent waits on the user for: an approval, a question or a
@@ -272,6 +274,73 @@ struct Viewer: Decodable {
     // the Files tab (open "files"), and an image or a PDF it opened
     let files: FilesPage?
     let file: FileView?
+    // the Review tab (open "review")
+    let review: ReviewPage?
+    // the review comments of the file on show
+    let comments: ReviewComments?
+}
+
+// Review comments (client.bend's Rc): the pins, at places in mm of the
+// file's coordinates ("rv-pin" id opens one), the one open, and the place
+// waiting for its note ("x\ty\tlayer\titem", "" none)
+struct ReviewPin: Decodable, Hashable {
+    let id: String
+    let x, y: Double
+    let resolved: Bool
+    let count: Int
+}
+
+struct ReviewReply: Decodable, Hashable {
+    let text, by: String
+}
+
+struct ReviewOpen: Decodable, Hashable {
+    let id, text, by, place: String
+    let resolved: Bool
+    let replies: [ReviewReply]
+}
+
+struct ReviewComments: Decodable {
+    let pins: [ReviewPin]
+    let open: ReviewOpen?
+    let at: String
+}
+
+// the Checks page's boxes ("rv-tick" index) and why the gate fails ("" it passes)
+struct ReviewTask: Decodable, Hashable {
+    let index: Int
+    let text, group: String
+    let done: Bool
+}
+
+struct ReviewChecks: Decodable {
+    let gate, line: String
+    let tasks: [ReviewTask]
+}
+
+// the Review tab: the page chips ("rv-page" page), the title, the report's
+// Markdown nodes (empty: say note), whether it is being made
+struct ReviewTab: Decodable, Hashable {
+    let page, label: String
+    let on: Bool
+}
+
+struct ReviewPage: Decodable {
+    let tabs: [ReviewTab]
+    let title, note: String
+    let busy: Bool
+    let blocks: [Block]?
+    let checks: ReviewChecks?
+    let release: ReleaseForm?
+}
+
+// the Release page's form: the tag that will be made (the field, else the
+// proposed one), the proposed one, and the two toggles
+struct ReleaseForm: Decodable {
+    let tag, next: String
+    let publish, force: Bool
+    let err: String
+    let text: String?
 }
 
 // the Files tab: where the folder is, its rows (a tap sends action with
@@ -303,10 +372,16 @@ struct FileView: Decodable {
 // per step then the live file (id ""), that menu, and the legend's
 // colours (0xRRGGBB: removed, changed, added)
 struct HistBar: Decodable, Equatable {
+    enum CodingKeys: String, CodingKey {
+        case n, at, title, entry, said, playing, diff, cmp, a, b, side, ticks, menu, keys
+        case showing = "as"
+    }
     let n, at: Int
     let title, entry, said: String
     let playing, diff, cmp: Bool
     let a, b, side: String
+    // which of Old, Diff and New shows in a comparison (Rv.showing)
+    let showing: String?
     let ticks: [HistTick]
     let menu: [HistRow]?
     let keys: [UInt32]
@@ -444,6 +519,12 @@ struct Tour: Decodable, Equatable {
     let step, count: Int
     let counter, title, body, next, back, skip: String
     let first: Bool
+    // the uberbot step's buttons: each sends its action and value as they are
+    let choices: [TourChoice]
+}
+
+struct TourChoice: Decodable, Equatable {
+    let label, action, value: String
 }
 
 // a thread being renamed: its id, the alert's title, the title so far, the
@@ -522,6 +603,7 @@ struct Found: Decodable, Hashable {
 // cat names its rig ("look:mood"), which the bridge gives once
 // (AppModel.cats).
 struct BotRow: Decodable, Identifiable {
+    let nav: String?
     let id, name, mood, note, peer, cat: String
     let act: String?
     let look: Int
@@ -531,6 +613,7 @@ struct BotRow: Decodable, Identifiable {
 
 // a room in the list ("room" sends its id)
 struct RoomRow: Decodable, Identifiable {
+    let nav: String?
     let id, name: String
     let members: Int
     let sel: Bool
@@ -545,7 +628,7 @@ struct ProviderChoice: Decodable, Hashable {
 }
 
 struct NewBot: Decodable {
-    let name, persona, provider: String
+    let name, hint, persona, provider: String
     let providers: [ProviderChoice]
 }
 
@@ -571,12 +654,16 @@ struct BotMemory: Decodable, Hashable {
 struct BotRoutine: Decodable, Hashable {
     let id, name, cron, when, prompt, last: String
     let on: Bool
+    // routines-cal: routine, once or reminder; what it says next, in the person's zone
+    let kind, label, next, rel, zone, doneText: String?
+    let done: Bool?
 }
 
 // the routine form ("routine-edit" id, or "" for a new one, opens it)
 struct RoutineForm: Decodable {
     let open: Bool
     let id, name, cron, prompt: String
+    let hint: String?
 }
 
 struct BotHook: Decodable, Hashable {
@@ -592,6 +679,9 @@ struct BotPeer: Decodable, Hashable {
 struct BotGoogle: Decodable {
     let status, url, gid, gsecret, gpaste: String
     let accounts: [String]
+    // the account whose signature is being edited ("" for none), its text, and each account's saved signature
+    let sigFor, sigText: String
+    let sigs: [String]
 }
 
 struct BotSettings: Decodable {
@@ -653,6 +743,9 @@ struct Screen: Decodable {
     let rowMenu: RowMenu?
     let bots: [BotRow]
     let rooms: [RoomRow]
+    // the uberbot's card and the status plane (Plane.swift); none without an uberbot
+    let uber: UberCard?
+    let plane: PlaneModel?
     let newBot: NewBot?
     let newRoom: NewRoom?
     let bot: BotView?
@@ -699,9 +792,101 @@ struct Out: Decodable, @unchecked Sendable {
     }
 
     // an answer; with screen false only its commands (a newer screen follows)
+    // The commands are decoded on their own: they carry the frames the hubs
+    // wait for, so a screen Swift cannot read never drops them (the last
+    // screen stays up, and the failure is logged with its path)
     static func decode(_ text: String, screen: Bool) -> Out? {
         let d = Data(text.utf8)
-        if screen { return try? JSONDecoder().decode(Out.self, from: d) }
-        return (try? JSONDecoder().decode(Cmds.self, from: d)).map { Out(screen: nil, cmds: $0.cmds) }
+        let cmds: [Cmd]
+        do { cmds = try JSONDecoder().decode(Cmds.self, from: d).cmds } catch {
+            NSLog("Backplane answer unreadable: %@", String(describing: error))
+            return nil
+        }
+        guard screen else { return Out(screen: nil, cmds: cmds) }
+        do {
+            let s = try JSONDecoder().decode(ScreenOnly.self, from: d)
+            return Out(screen: s.screen, cmds: cmds)
+        } catch {
+            NSLog("Backplane screen unreadable: %@", String(describing: error))
+            return Out(screen: nil, cmds: cmds)
+        }
+    }
+
+    private struct ScreenOnly: Decodable {
+        let screen: Screen?
+    }
+}
+
+// One value that may fail to decode on its own (nil then), so one bad item
+// or section never takes the screen around it with it
+struct Lossy<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws {
+        do { value = try T(from: decoder) } catch {
+            NSLog("Backplane skipped %@ at %@: %@", String(describing: T.self),
+                  decoder.codingPath.map(\.stringValue).joined(separator: "."), String(describing: error))
+            value = nil
+        }
+    }
+}
+
+extension KeyedDecodingContainer {
+    // a section: absent, null or unreadable is nil
+    func lossy<T: Decodable>(_ key: Key) -> T? {
+        ((try? decodeIfPresent(Lossy<T>.self, forKey: key)) ?? nil)?.value
+    }
+    // a list: absent, null or unreadable is empty; unreadable items are skipped
+    func lossyList<T: Decodable>(_ key: Key) -> [T] {
+        (((try? decodeIfPresent([Lossy<T>].self, forKey: key)) ?? nil) ?? []).compactMap(\.value)
+    }
+}
+
+// The screen as Bend sends it (src/mobile/screen.bend). Every field is read
+// on its own: a field Bend leaves out or a shape this build does not know
+// costs that field, never the whole screen (a blank app).
+extension Screen {
+    private enum K: String, CodingKey {
+        case online, version, error, note, sel, empty, hub, hubs, found, projects, view, making, active, older, settled,
+             rowMenu, bots, rooms, uber, plane, newBot, newRoom, bot, deleting, removing, renaming, tour, search,
+             folders, settings, find, island, islands, thread, theme
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        online = c.lossy(.online) ?? false
+        version = c.lossy(.version) ?? ""
+        error = c.lossy(.error) ?? ""
+        note = c.lossy(.note) ?? ""
+        sel = c.lossy(.sel) ?? ""
+        empty = c.lossy(.empty) ?? ""
+        hub = c.lossy(.hub) ?? ""
+        hubs = c.lossyList(.hubs)
+        found = c.lossyList(.found)
+        projects = c.lossyList(.projects)
+        view = c.lossy(.view)
+        making = c.lossy(.making)
+        active = c.lossy(.active).map { (l: [Lossy<Row>]) in l.compactMap(\.value) }
+        older = c.lossy(.older)
+        settled = c.lossy(.settled)
+        rowMenu = c.lossy(.rowMenu)
+        bots = c.lossyList(.bots)
+        rooms = c.lossyList(.rooms)
+        uber = c.lossy(.uber)
+        plane = c.lossy(.plane)
+        newBot = c.lossy(.newBot)
+        newRoom = c.lossy(.newRoom)
+        bot = c.lossy(.bot)
+        deleting = c.lossy(.deleting)
+        removing = c.lossy(.removing)
+        renaming = c.lossy(.renaming)
+        tour = c.lossy(.tour)
+        search = c.lossy(.search)
+        folders = c.lossy(.folders)
+        settings = c.lossy(.settings)
+        find = c.lossy(.find)
+        island = c.lossy(.island) ?? IslandAttributes.ContentState(running: 0, headline: "", lines: [])
+        islands = c.lossy(.islands).map { (l: [Lossy<HubIsland>]) in l.compactMap(\.value) }
+        thread = c.lossy(.thread)
+        theme = c.lossy(.theme)
     }
 }

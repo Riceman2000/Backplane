@@ -1,4 +1,6 @@
 import Base
+import ../../src/app/bots.bend as BV
+import ../../src/app/cats.bend as CA
 import ../../src/core/json.bend as J
 import ../../src/core/utf8.bend as U8
 import ../../src/core/client.bend as U
@@ -7,6 +9,7 @@ import ../../src/app/layout.bend as L
 import ../../src/gfx/raster.bend as R
 import ../../src/gfx/draw.bend as D
 import ../../src/app/theme.bend as T
+import ../../src/server/argv.bend as AV
 
 # A frame of the window from an event log and an info message, as a PPM,
 # with no window (its timeline and its theme as the window draws them): `ui_snap EVENTS INFO THREAD FLAGS OUT` (the INFO file may hold
@@ -102,7 +105,8 @@ def go(+as: List<&2, String>) -> IO(Unit):
     +ww : U32 = Maybe.default(&2, U32, U32.read(arg(as, 5n)), 1400)
     +hh : U32 = Maybe.default(&2, U32, U32.read(arg(as, 6n)), 860)
     +n : S.Nui = S.Nui.init(ui_of(bs, U8.Utf8.decode(ib), arg(as, 2n), arg(as, 3n)), ww, hh)
-    +os : List<&2, R.Op> = L.Theme.ops(S.Nui.light(n), ops(L.Lay.frame(ty, L.TL.memos.now(L.Lay.memos(ty, n, Nil{})), n)))
+    +ws : Map<&2, BV.PW> = BV.Bv.wraps(ty, n, BV.Bv.wraps.none())
+    +os : List<&2, R.Op> = L.Theme.ops(S.Nui.light(n), ops(BV.Bv.frame.w(ty, L.TL.memos.now(L.Lay.memos(ty, n, Nil{})), CA.Cats.none(), ws, n)))
     +img : Image = R.Frame.render(ww, hh, os, L.Theme.ground(S.Nui.look(n)))
     g : File <- IO.try(File, File.open(arg(as, 4n), "w"))
     w : File & Result<&1, &1, U32 & String, Unit> <- File.write_bytes(g, D.Snap.ppm(img, ww, hh))
@@ -110,5 +114,5 @@ def go(+as: List<&2, String>) -> IO(Unit):
 
 def main() -> IO(Unit):
   do IO<Unit>:
-    args : List<String> <- IO.args()
+    args : List<String> <- AV.Argv.args()
     go(copy(args))

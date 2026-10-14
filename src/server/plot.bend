@@ -1,4 +1,5 @@
 import Base
+import ../core/exe.bend as EX
 import ./host.bend as H
 import ./kicad.bend as K
 import ../core/mech.bend as MC
@@ -67,12 +68,12 @@ def Pv.fuel() -> Nat:
 
 def Pv.say(+out: Chan(POut), +client: U32, text: String) -> IO(Unit):
   do IO<Unit>:
-    ok : Bool <- Chan.send(POut, out, POut{client, text})
+    ok : Result<&1, &1, POut, Unit> <- Chan.send(POut, out, POut{client, text})
     return Unit{}
 
 def Pv.bin(+out: Chan(POut), +client: U32, bs: List<&2, U32>) -> IO(Unit):
   do IO<Unit>:
-    ok : Bool <- Chan.send(POut, out, PBin{client, bs})
+    ok : Result<&1, &1, POut, Unit> <- Chan.send(POut, out, PBin{client, bs})
     return Unit{}
 
 # Sources
@@ -572,10 +573,10 @@ def Pv.side(+kind: U32, bs: List<&2, U32>) -> Maybe<&2, List<&2, B.Item>>:
     case +b <> t:
       Pv.parse.k(U32.is_eq(kind, 1), b <> t)
 
-def Pv.mark(a: Maybe<&2, List<&2, B.Item>>, b: Maybe<&2, List<&2, B.Item>>) -> Maybe<&2, List<&2, B.Item>>:
+def Pv.mark(+bits: U32, a: Maybe<&2, List<&2, B.Item>>, b: Maybe<&2, List<&2, B.Item>>) -> Maybe<&2, List<&2, B.Item>>:
   match a b:
     case Some{+oa} Some{+nb}:
-      Some{HS.Hist.mark(oa, nb)}
+      Some{HS.Hist.mark.on(bits, oa, nb)}
     case _ _:
       None{}
 
@@ -586,7 +587,7 @@ def Pv.child.diff(+kind: U32, +path: String, +infos: String) -> IO(Unit):
   do IO<Unit>:
     +a : List<&2, U32> <- GT.Git.version(HS.Hist.old(path))
     +b : List<&2, U32> <- GT.Git.version(HS.Hist.new(path))
-    Pv.child.k(Pv.plot(Pv.mark(Pv.side(kind, a), Pv.side(kind, b)), U32.or(kind, LO.Look.diff())), 0, infos)
+    Pv.child.k(Pv.plot(Pv.mark(HS.Hist.bits(path), Pv.side(kind, a), Pv.side(kind, b)), U32.or(kind, LO.Look.diff())), 0, infos)
 
 def Pv.child.plot(+kind: U32, +path: String, +infos: String) -> IO(Unit):
   Bool.pick(IO(Unit), Nat.is_eq(HS.Hist.kind(path), 2n), Pv.child.diff(kind, path, infos), Pv.child.one(kind, path, infos))
@@ -648,7 +649,7 @@ def Pv.tree.say(r: PR.Ran, +client: U32, +root: String, +out: Chan(POut)) -> IO(
 
 def Pv.tree.k(+file: String, +client: U32, +root: String, +out: Chan(POut)) -> IO(Unit):
   Bool.pick(IO(Unit), String.is_empty(file), IO.pure(Unit, Unit{}),
-    IO.bind(String, Unit, H.Sys.exe_path(), exe => IO.bind(PR.Ran, Unit, PR.Proc.run(exe, ["--plot-tree", file], "/"), r => Pv.tree.say(r, client, root, out))))
+    IO.bind(String, Unit, H.Sys.exe_path(), exe => IO.bind(PR.Ran, Unit, PR.Proc.run(EX.Exe.child(exe), ["--plot-tree", file], "/"), r => Pv.tree.say(r, client, root, out))))
 
 def Pv.tree(+client: U32, +root: String, +path: String, +out: Chan(POut)) -> IO(Unit):
   IO.bind(K.Files, Unit, K.Files.read(root), f => Pv.tree.k(Tree.root(f, Bool.pick(String, Nat.is_eq(HS.Hist.kind(path), 1n), path, "")), client, root, out))
@@ -704,7 +705,7 @@ def Pv.got.err(r: PR.Ran) -> String:
 def Pv.read.k(sm: U32 & U32, +r: PR.Ran, +key: String, +kind: U32, +q: Chan(PMsg)) -> IO(Unit):
   (sz, mt) = sm
   do IO<Unit>:
-    ok : Bool <- Chan.send(PMsg, q, PGot{key, sz, mt, Pv.got.ran(r, kind), Pv.got.err(r)})
+    ok : Result<&1, &1, PMsg, Unit> <- Chan.send(PMsg, q, PGot{key, sz, mt, Pv.got.ran(r, kind), Pv.got.err(r)})
     return Unit{}
 
 # read and plot a file in a child process (the stamp is taken first, so a
@@ -778,7 +779,7 @@ def Pv.read(+key: String, +kind: U32, +path: String, +q: Chan(PMsg), +dir: Strin
   do IO<Unit>:
     st : U32 & U32 <- Pv.stamp.of(path)
     exe : String <- H.Sys.exe_path()
-    r : PR.Ran <- PR.Proc.run(exe, ["--plot", U32.show(kind), path, Pv.infos(dir, key)], "/")
+    r : PR.Ran <- PR.Proc.run(EX.Exe.child(exe), ["--plot", U32.show(kind), path, Pv.infos(dir, key)], "/")
     Pv.read.k(st, r, key, kind, q)
 
 # Polling
@@ -834,7 +835,7 @@ def Pv.poll(ss: List<&2, Src>, +q: Chan(PMsg), +dir: String) -> IO(List<&2, Src>
 def Pv.later(+q: Chan(PMsg)) -> IO(Unit):
   do IO<Unit>:
     IO.sleep(150)
-    ok : Bool <- Chan.send(PMsg, q, PPoll{})
+    ok : Result<&1, &1, PMsg, Unit> <- Chan.send(PMsg, q, PPoll{})
     return Unit{}
 
 # the next poll, while anything is watched
@@ -872,7 +873,7 @@ def Pv.start(polling: Bool, +q: Chan(PMsg)) -> IO(Bool):
       IO.pure(Bool, True{})
     case False{}:
       do IO<Bool>:
-        ok : Bool <- Chan.send(PMsg, q, PPoll{})
+        ok : Result<&1, &1, PMsg, Unit> <- Chan.send(PMsg, q, PPoll{})
         return True{}
 
 def Pv.none(+kind: U32) -> String:
@@ -958,7 +959,7 @@ def Pv.info.done(r: PR.Ran, +client: U32, +id: String, +out: Chan(POut)) -> IO(U
 def Pv.info(+client: U32, +id: String, +file: String, +sig: U32, +idx: Nat, +out: Chan(POut)) -> IO(Unit):
   do IO<Unit>:
     exe : String <- H.Sys.exe_path()
-    r : PR.Ran <- PR.Proc.run(exe, ["--plot-info", file, U32.show(sig), Nat.show(idx)], "/")
+    r : PR.Ran <- PR.Proc.run(EX.Exe.child(exe), ["--plot-info", file, U32.show(sig), Nat.show(idx)], "/")
     Pv.info.done(r, client, id, out)
 
 def Pv.handle(st: PSt, m: PMsg, +q: Chan(PMsg), +out: Chan(POut), +dir: String) -> IO(PSt):

@@ -27,8 +27,15 @@ final class AppModel {
     private(set) var links: [String] = UserDefaults.standard.stringArray(forKey: "links")
         ?? UserDefaults.standard.string(forKey: "link").map { [$0] } ?? []
     private(set) var screen: Screen?
-    // the island tapped while several threads work: which one to open
-    var picking = false
+    // the last status plane the hub sent, drawn while a screen carries none (the
+    // hub builds the plane only for the list and the Status tab, so going back
+    // from a thread shows this one at once)
+    private(set) var lastUber: UberCard?
+    private(set) var lastPlane: PlaneModel?
+
+    // the card and the plane to draw: the screen's, else the last it carried
+    func uber(_ s: Screen) -> UberCard? { s.plane != nil ? s.uber : (s.uber == nil ? nil : lastUber ?? s.uber) }
+    func plane(_ s: Screen) -> PlaneModel? { s.plane ?? (s.uber == nil ? nil : lastPlane) }
     // the board viewer's plots, which come straight from the socket
     let plots = PlotStore()
     // the composer's text, owned here so typing never waits on Bend
@@ -45,6 +52,22 @@ final class AppModel {
     // the last screen of each thread shown, by its id: a thread tapped
     // again shows at once while its fresh screen is made
     private(set) var seen: [String: ThreadView] = [:]
+    private(set) var seenBots: [String: BotView] = [:]
+    private(set) var seenPlanes: [String: PlaneModel] = [:]
+    @ObservationIgnored private var botOrder: [String] = []
+    private(set) var destination: TapDestination?
+    // the page the stack was last moved to by the person: until a screen
+    // shows it, screens of other selections (answers to older actions)
+    // leave the stack alone, so a tap then a swipe back never bounces;
+    // given up after 3 s (a page that never comes, a dropped screen), so a
+    // notification's select still moves the stack
+    @ObservationIgnored private var awaitedNav: String?
+    @ObservationIgnored private var awaitedAt = Date.distantPast
+    @ObservationIgnored private var pushed = Date.distantPast
+    #if DEBUG
+    @ObservationIgnored private var tapStart: (nav: String, at: UInt64, first: Int?, full: Int?)?
+    private(set) var tapTimes: [String] = []
+    #endif
     @ObservationIgnored private var seenOrder: [String] = []
     // messages sent from this phone the client has not answered yet: shown
     // at once as sending, dropped when the answer (with its own sending
@@ -55,6 +78,17 @@ final class AppModel {
     // answers an older action never pulls a thread back open
     private(set) var path: [String] = []
     @ObservationIgnored private var shownSel = ""
+    // the bot, room or remote bot last tapped ("bot", "room", "remote" and
+    // its row's id), until a screen shows it: it opens then even when the
+    // selection matches the last screen's (a swipe back whose own screen
+    // was dropped, or never came, before the tap)
+    @ObservationIgnored private var tapped: String?
+    // when the stack last popped, and a push waiting for that pop's
+    // animation (about half a second) to end: SwiftUI drops a push made
+    // during it, and its stack then shows the list while path says the
+    // page is open
+    @ObservationIgnored private var popped = Date.distantPast
+    @ObservationIgnored private var pending: [String]?
     // a new thread's page was opened while the hub makes it
     @ObservationIgnored private var shownMaking = false
     // the hub whose plots are drawn: frames from any other are dropped
@@ -102,10 +136,16 @@ final class AppModel {
     }
 
     init() {
+        engine.onFlush = { [weak self] out in
+            Task { @MainActor [weak self] in self?.apply(out) }
+        }
         #if DEBUG
         if let l = ProcessInfo.processInfo.environment["BACKPLANE_LINK"] { links = l.split(separator: " ").map(String.init) }
         #endif
         notifier.open = { [weak self] id in self?.act("select", id) }
+        NotificationCenter.default.addObserver(forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main) { [weak self] _ in
+            self?.act("tz-report", TimeZone.current.identifier)
+        }
         notifier.viewing = { [weak self] id in self?.active == true && self?.screen?.sel == id }
         let e = engine
         Task {
@@ -211,6 +251,8 @@ final class AppModel {
                 if self?.shownHub == key { self?.plots.reset() }
                 self?.conn[key, default: HubConn()].phase = .syncing
                 self?.run { await $0.online(key, true) }
+                // where the person is: every hub keeps the phone's zone (routines follow it)
+                self?.act("tz-report", TimeZone.current.identifier)
             },
             // plots go straight to the viewer, never through the Bend client,
             // and only the hub in focus draws
@@ -251,6 +293,13 @@ final class AppModel {
     }
 
     func act(_ action: String, _ value: String = "") {
+        // a web address a settings row offers (Antigravity's sign-in):
+        // opened in the browser here, never sent to the engine
+        if action == "open-url" {
+            if let u = URL(string: value), u.scheme == "https" || u.scheme == "http" { UIApplication.shared.open(u) }
+            return
+        }
+        if Self.opens.contains(action) { tapped = value }
         run { await $0.act(action, value) }
     }
 
@@ -295,8 +344,35 @@ final class AppModel {
         }
     }
 
+    // Every row opens through this point; Bend's nav is the destination key.
+    func open(nav: String, action: String, value: String, title: String, cat: String = "", kind: String = "thread") {
+        // a row from an older bridge has no nav: its page opens when its screen comes
+        guard !nav.isEmpty else { act(action, value); return }
+        guard path.last != nav, pending?.last != nav,
+              Date().timeIntervalSince(pushed) >= 0.35 else { return }
+        pushed = Date()
+        let rig = cat.isEmpty ? (screen?.bots.first(where: { $0.nav == nav })?.cat ?? (screen?.uber?.nav == nav ? screen?.uber?.cat : nil) ?? "") : cat
+        destination = TapDestination(nav: nav, title: title, cat: rig, kind: kind)
+        awaitedNav = nav
+        awaitedAt = Date()
+        #if DEBUG
+        tapStart = (nav, DispatchTime.now().uptimeNanoseconds, nil, nil)
+        #endif
+        show([nav])
+        act(action, value)
+    }
+
     func navigate(_ p: [String]) {
+        if p.count < path.count { popped = Date() }
         path = p
+        destination = nil
+        awaitedNav = p.last ?? ""
+        awaitedAt = Date()
+        #if DEBUG
+        tapStart = nil
+        #endif
+        tapped = nil
+        pending = nil
         act("select", p.last ?? "")
     }
 
@@ -307,6 +383,17 @@ final class AppModel {
             seenOrder.removeAll { $0 == sel }
             seenOrder.append(sel)
             if seenOrder.count > 24 { seen[seenOrder.removeFirst()] = nil }
+        }
+    }
+
+    private func rememberBot(_ nav: String, _ b: BotView) {
+        seenBots[nav] = b
+        botOrder.removeAll { $0 == nav }
+        botOrder.append(nav)
+        if botOrder.count > 24 {
+            let old = botOrder.removeFirst()
+            seenBots[old] = nil
+            seenPlanes[old] = nil
         }
     }
 
@@ -330,6 +417,67 @@ final class AppModel {
     func hubURL(_ path: String, query: [URLQueryItem] = [], token: Bool = true) -> URL? {
         guard let s = screen, let l = links.first(where: { Pairing.key($0) == s.hub }) else { return nil }
         return Pairing.http(l, path: path, query: query, token: token)
+    }
+
+    // the actions that open a bot's, a room's or a remote bot's page, and
+    // the uberbot's card ("uber": the uberbot is not in the bots list, so
+    // its card is the only way in; without it here, a swipe back whose own
+    // screen was dropped left the card unable to open it again)
+    static let opens: Set<String> = ["bot", "room", "remote", "uber", "uber-bot"]
+
+    // whether the screen shows what was tapped (the row's id is its hub's
+    // key and the bot's id, the screen's bot its id alone) while the stack
+    // does not
+    private func shows(tapped s: Screen, _ nav: String) -> Bool {
+        guard let t = tapped, let b = s.bot, !nav.isEmpty, t == b.id || t.hasSuffix("|" + b.id) else { return false }
+        tapped = nil
+        return (pending ?? path) != [nav]
+    }
+
+    #if DEBUG
+    private func tapShown(_ nav: String) {
+        guard var t = tapStart, t.nav == nav, t.first == nil else { return }
+        t.first = Int((DispatchTime.now().uptimeNanoseconds - t.at) / 1_000_000)
+        tapStart = t
+        tapReport()
+    }
+
+    private func tapFull(_ nav: String) {
+        guard var t = tapStart, t.nav == nav, t.full == nil else { return }
+        t.full = Int((DispatchTime.now().uptimeNanoseconds - t.at) / 1_000_000)
+        tapStart = t
+        tapReport()
+    }
+
+    private func tapReport() {
+        guard let t = tapStart, let first = t.first, let full = t.full else { return }
+        NSLog("Backplane tap %@ first %d ms full %d ms", t.nav, first, full)
+        tapTimes.append("\(t.nav) first \(first) ms full \(full) ms")
+        if tapTimes.count > 24 { tapTimes.removeFirst() }
+        tapStart = nil
+    }
+    #endif
+
+    // the stack moved to p by a screen; a push waits out a pop's animation
+    private func show(_ p: [String]) {
+        let wait = popped.timeIntervalSinceNow + 0.8
+        guard wait > 0, p.count > path.count else {
+            pending = nil
+            path = p
+            #if DEBUG
+            if let nav = p.last { tapShown(nav) }
+            #endif
+            return
+        }
+        pending = p
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self, self.pending == p else { return }
+            self.pending = nil
+            self.path = p
+            #if DEBUG
+            if let nav = p.last { self.tapShown(nav) }
+            #endif
+        }
     }
 
     // the page of a thread asked for and not yet made
@@ -376,9 +524,8 @@ final class AppModel {
         if url.host == "open" {
             let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             let id = q.first { $0.name == "thread" }?.value ?? ""
+            // (an older Live Activity's "pick=1" opens the app as it was)
             if !id.isEmpty { act("select", id) }
-            // the island with several threads: pick one (backplane://open?pick=1)
-            else if q.contains(where: { $0.name == "pick" }), (screen?.island.lines.count ?? 0) > 1 { picking = true }
         } else if url.host != "google" {
             // (backplane://google ends a Google sign-in: GoogleLoop)
             pair(url.absoluteString)
@@ -408,15 +555,30 @@ final class AppModel {
         if let s = o.screen {
             if typing == 0 { composer = s.thread?.draft ?? "" }
             screen = s
+            if s.uber == nil { lastUber = nil; lastPlane = nil } else if s.plane != nil { lastUber = s.uber; lastPlane = s.plane }
             if let t = s.thread, !s.sel.isEmpty { remember(s.sel, t) }
             if s.hub != shownHub {
                 shownHub = s.hub
                 plots.reset()
             }
             let nav = Self.nav(s)
-            if nav != shownSel {
-                shownSel = nav
-                path = nav.isEmpty ? [] : [nav]
+            if let b = s.bot, !nav.isEmpty {
+                rememberBot(nav, b)
+                if let p = s.plane { seenPlanes[nav] = p }
+            }
+            let accepted = awaitedNav == nil || awaitedNav == nav || awaitedAt.timeIntervalSinceNow < -3
+            if accepted {
+                awaitedNav = nil
+                if destination?.nav == nav { destination = nil }
+                #if DEBUG
+                tapFull(nav)
+                #endif
+                // Evaluate the tap even when nav changed (#68).
+                let tappedPage = shows(tapped: s, nav)
+                if nav != shownSel || tappedPage {
+                    shownSel = nav
+                    show(nav.isEmpty ? [] : [nav])
+                }
             }
             // New Thread: its page opens at once and waits there for the
             // hub's thread (the selection above replaces it); a failure
@@ -436,23 +598,41 @@ final class AppModel {
                 opening = nil
                 act("select", s.hub + "|" + id)
             }
-            if let n = botting, let b = s.bots.first(where: { $0.name == n }) {
+            if let n = botting, let u = s.uber, u.name == n {
                 botting = nil
-                act(b.act ?? (b.remote ? "remote" : "bot"), b.id)
+                open(nav: u.nav ?? "", action: "uber", value: u.id, title: u.name, cat: u.cat, kind: "bot")
+            } else if let n = botting, let b = s.bots.first(where: { $0.name == n }) {
+                botting = nil
+                open(nav: b.nav ?? "", action: b.act ?? (b.remote ? "remote" : "bot"), value: b.id, title: b.name, cat: b.cat, kind: b.remote ? "remote" : "bot")
             } else if let n = botting, let r = s.rooms.first(where: { $0.name == n }) {
                 botting = nil
-                act("room", r.id)
+                open(nav: r.nav ?? "", action: "room", value: r.id, title: r.name, kind: "room")
             }
             if opening == nil, let v = viewing, let t = s.thread, !t.viewer.choices.isEmpty {
                 viewing = nil
                 act("view", v)
             }
-            if opening == nil, let a = acting, s.thread != nil {
+            if opening == nil, botting == nil, let a = acting, !s.projects.isEmpty || s.bot != nil {
                 acting = nil
                 Task {
-                    for step in a.components(separatedBy: ";;") where !step.isEmpty {
-                        try? await Task.sleep(for: .seconds(2))
+                    for var step in a.components(separatedBy: ";;") where !step.isEmpty {
+                        // "!step": at once, not two seconds after the one before
+                        if step.hasPrefix("!") { step.removeFirst() } else { try? await Task.sleep(for: .seconds(2)) }
                         let kv = step.split(separator: "=", maxSplits: 1).map(String.init)
+                        if kv[0] == "@times" { NSLog("Backplane taps %@", tapTimes.joined(separator: "; ")); continue }
+                        if kv[0] == "@open", kv.count > 1 {
+                            let name = kv[1]
+                            if let u = screen?.uber, u.name == name {
+                                open(nav: u.nav ?? "", action: "uber", value: u.id, title: u.name, cat: u.cat, kind: "bot")
+                            } else if let b = screen?.bots.first(where: { $0.name == name }) {
+                                open(nav: b.nav ?? "", action: b.act ?? (b.remote ? "remote" : "bot"), value: b.id, title: b.name, cat: b.cat, kind: b.remote ? "remote" : "bot")
+                            } else if let r = screen?.rooms.first(where: { $0.name == name }) {
+                                open(nav: r.nav ?? "", action: "room", value: r.id, title: r.name, kind: "room")
+                            }
+                            continue
+                        }
+                        // "@back": what a swipe back does
+                        if kv[0] == "@back" { navigate(Array(path.dropLast())); continue }
                         // "@attach": a noisy PNG big enough to go up in several pieces
                         if kv[0] == "@attach" {
                             let img = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 400)).image { c in
@@ -523,4 +703,8 @@ struct HubConn: Equatable {
 struct Outgoing: Identifiable, Equatable {
     let id = UUID()
     let thread, text: String
+}
+
+struct TapDestination {
+    let nav, title, cat, kind: String
 }

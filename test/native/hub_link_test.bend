@@ -5,6 +5,7 @@ import ../../src/server/server.bend as S
 import ../../src/server/host.bend as H
 import ../../src/core/json.bend as J
 import ../../src/core/utf8.bend as U
+import ../../src/server/argv.bend as AV
 
 # Native network regression probe (temporary hubs only):
 #   scripts/build-app.sh test/native/hub_link_test.bend build/hub_link_test
@@ -44,13 +45,13 @@ def Probe.link(url: String, since: Nat, origin: String) -> IO(Unit):
     +inbox : Chan(S.Msg) <- L.Link.start(url)
     +out : Chan(S.Wire) <- Chan.new(S.Wire, 8192)
     +t0 : Nat <- IO.now()
-    ok : Bool <- Chan.send(S.Msg, inbox, S.Join{0, out, since, origin, 1, 0})
+    ok : Result<&1, &1, S.Msg, Unit> <- Chan.send(S.Msg, inbox, S.Join{0, out, since, origin, 1, 0})
     +text : String <- Probe.read(10n, out)
     +t1 : Nat <- IO.now()
     IO.print("link elapsed ms=" ++ Nat.show(Nat.sub(t1, t0)) ++ " " ++ text)
     C.Check.str("link returns log or explicit unreachable", Bool.show(Probe.done(Probe.object(text))), "True")
     C.Check.str("connect and handshake are bounded", Bool.show(Nat.is_le(Nat.sub(t1, t0), 11000n)), "True")
-    left : Bool <- Chan.send(S.Msg, inbox, S.Leave{0})
+    left : Result<&1, &1, S.Msg, Unit> <- Chan.send(S.Msg, inbox, S.Leave{0})
     return Unit{}
 
 def Probe.accepted(r: Listener & Result<&1, &1, U32 & String, Socket>) -> IO(Unit):
@@ -81,7 +82,7 @@ def Probe.sent(r: Socket & Result<&1, &1, U32 & String, Unit>, t0: Nat) -> IO(Un
 
 def Probe.whois() -> IO(Unit):
   do IO<Unit>:
-    listener : Listener <- IO.try(Listener, TCP.listen(3891))
+    listener : Listener <- IO.try(Listener, TCP.listen("0.0.0.0", 3891))
     IO.spawn(Unit, IO.bind(Listener & Result<&1, &1, U32 & String, Socket>, Unit, TCP.accept(listener), Probe.accepted))
     s : Socket <- IO.try(Socket, TCP.connect("127.0.0.1", 3891))
     t0 : Nat <- IO.now()
@@ -96,4 +97,4 @@ def Probe.args(xs: List<&1, String>) -> IO(Unit):
     case Nil{}: IO.print("pass a temporary hub URL or whois")
 
 def main() -> IO(Unit):
-  IO.bind(List<&1, String>, Unit, IO.args(), Probe.args)
+  IO.bind(List<&1, String>, Unit, AV.Argv.args(), Probe.args)

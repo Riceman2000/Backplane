@@ -4,6 +4,7 @@ import ../../src/core/model.bend as M
 import ../../src/core/client.bend as U
 import ../../src/core/json.bend as J
 import ../../src/app/link.bend as LK
+import ../../src/server/argv.bend as AV
 
 # What switching the window to another machine's hub costs: a link
 # (src/app/link.bend) joined as the window joins it, timed until the hub's
@@ -74,17 +75,17 @@ def replay(m: Maybe<&2, String>, +t1: Nat) -> IO(Unit):
 
 def main() -> IO(Unit):
   do IO<Unit>:
-    args : List<String> <- IO.args()
+    args : List<String> <- AV.Argv.args()
     +to : String = url(args)
     +t0 : Nat <- IO.now()
     +inbox : Chan(S.Msg) <- LK.Link.start(to)
     +out : Chan(S.Wire) <- Chan.new(S.Wire, 8192)
-    ok : Bool <- Chan.send(S.Msg, inbox, S.Join{0, out, 0n, "", 1, 0})
+    ok : Result<&1, &1, S.Msg, Unit> <- Chan.send(S.Msg, inbox, S.Join{0, out, 0n, "", 1, 0})
     +m : Maybe<&2, String> <- wait(64n, out, t0)
     +t1 : Nat <- IO.now()
     seen(0n, "link: connect, fetch and decode the log", t0, t1)
     replay(m, t1)
     +t4 : Nat <- IO.now()
     seen(0n, "total", t0, t4)
-    ok2 : Bool <- Chan.send(S.Msg, inbox, S.Leave{0})
+    ok2 : Result<&1, &1, S.Msg, Unit> <- Chan.send(S.Msg, inbox, S.Leave{0})
     return Unit{}

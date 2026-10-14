@@ -1,4 +1,5 @@
 import Base
+import ./deploy.bend as DP
 import ./live.bend as LV
 import ./json.bend as J
 import ./model.bend as M
@@ -19,13 +20,24 @@ import ./far.bend as FR
 import ./fview.bend as FV
 import ./farlive.bend as FLV
 import ./desk.bend as DK
+import ./notice.bend as NO
 import ./hist.bend as HI
+import ./review.bend as RVW
+import ./release.bend as REL
 import ./links.bend as LK
 import ./apikeys.bend as AK
+import ./agy.bend as AGY
 import ./diff.bend as DF
 import ./fm.bend as FM
 import ./onboard.bend as OB
 import ./layers.bend as LY
+import ./slash.bend as SL
+import ./uber.bend as UB
+import ./ubersync.bend as US
+import ./cron.bend as CR
+import ./tz.bend as TZ
+import ./when.bend as WH
+import ./sched.bend as SC
 
 # The client state, Elm-style, shared by the native window and the web
 # page: a host feeds server messages to Ui.recv and user actions to Ui.act,
@@ -58,7 +70,7 @@ type Cmd is Data:
   Send{text: String}
   Copy{text: String}
   Focus{id: String}
-  Scroll{}
+  ScrollEnd{}
   # talk to another machine's hub ("" is this machine's own)
   Connect{url: String}
   # a thread's draft as it now is: the host writes it down at once (a file,
@@ -723,9 +735,13 @@ def Update.waits(+st: M.State) -> Nat:
 def Update.waits.line(+n: Nat, +nf: Map<&2, String>, +note: String) -> String:
   Bool.pick(String, Nat.is_eq(n, 0n), Update.line(nf, note), "Update waits for " ++ Nat.show(n) ++ Bool.pick(String, Nat.is_eq(n, 1n), " thread", " threads") ++ " to finish their work.")
 
+# a deploy waiting for a safe point (core/deploy.bend) shows in its place
+def Update.line.d(+row: String, +n: Nat, +nf: Map<&2, String>, +note: String) -> String:
+  Bool.pick(String, String.is_empty(row), Update.waits.line(n, nf, note), row)
+
 # the version row's line, with the wait
 def Update.line.w(+st: M.State, +nf: Map<&2, String>, +note: String) -> String:
-  Update.waits.line(Update.waits(st), nf, note)
+  Update.line.d(DP.Deploy.row(st), Update.waits(st), nf, note)
 
 # which button the version row shows: 0 none (a packaged install),
 # 1 install an update offered, 2 check now, 3 update now (one waiting)
@@ -938,7 +954,7 @@ def Ui.rpc.keep.msg(u: Ui, +m: String, +p: List<&2, J.KV>) -> Act:
 # ----------
 # While a turn runs, a message either waits in the queue or steers the
 # turn. The "followup" setting picks ("queue" or "steer"); unset, each
-# provider keeps its way (Claude steers, Codex and Grok queue). Ctrl+Enter
+# provider keeps its way (Claude steers, Codex, Grok and Muse queue). Ctrl+Enter
 # does the other one for that message (laws follow_*).
 
 def Follow.flip(+m: String) -> String:
@@ -1019,7 +1035,7 @@ def Ui.send.t(u: Ui, text: String, +mode: String) -> Act:
   match u:
     case Ui{st, +sel, dr, live, op, on, +now, ad, pa, v, +rid, w, er, note, +nf, ob, tr}:
       Ui.also(Ui.rpc.keep(Ui{st, sel, Map.set(&2, String, Map.set(&2, String, dr, sel, ""), "@att:" ++ sel, ""), live, op, on, now, ad, pa, v, rid, w, er, note, nf, ob, tr},
-        "turn.start", [J.KV{"thread", J.Str{sel}}, J.KV{"text", J.Str{text}}, J.KV{"msg", J.Str{Ui.msg_id(Str.get(nf, "cid"), now, rid)}}, J.KV{"mode", J.Str{mode}}]), List.append(&2, Cmd, Draft.keep(sel, ""), [Scroll{}]))
+        "turn.start", [J.KV{"thread", J.Str{sel}}, J.KV{"text", J.Str{text}}, J.KV{"msg", J.Str{Ui.msg_id(Str.get(nf, "cid"), now, rid)}}, J.KV{"mode", J.Str{mode}}]), List.append(&2, Cmd, Draft.keep(sel, ""), [ScrollEnd{}]))
 
 # the add form shut (the folder goes to Proj.adding)
 def Ui.add_project(u: Ui) -> Ui:
@@ -1136,7 +1152,7 @@ def Ui.actions() -> List<&2, String>:
    "attach-up", "attach-end",
    "hist-go", "hist-prev", "hist-next", "hist-first", "hist-last", "hist-play", "hist-tick", "hist-diff", "hist-live", "hist-jump",
    "hist-show", "cmp", "cmp-pick", "cmp-close", "cmp-side", "cmp-shut", "key-add", "key-del", "fm", "fm-cd", "fm-up", "fm-open", "pdf-page", "fm-page", "update-now", "work-cancel", "task-cancel",
-   "view-layer-pick", "view-layer-mode"]
+   "view-layer-pick", "view-layer-mode", "skill-close", "wake-cancel", "deploy-cancel", "lock-release", "lock-cancel"]
 
 # Reading the client state
 # ------------------------
@@ -1152,7 +1168,7 @@ def Ui.reselect(+old: String, +u: Ui) -> Ui:
 
 # (Ui.act brings the thread's own panel); a thread chosen leaves Settings
 def Ui.select(u: Ui, +id: String) -> Act:
-  Act{Ui.flag_off(Ui.select.k(u, id), "settings"), [Focus{"composer"}, Scroll{}]}
+  Act{Ui.flag_off(Ui.select.k(u, id), "settings"), [Focus{"composer"}, ScrollEnd{}]}
 
 def Ui.reselect.act(+old: String, a: Act) -> Act:
   match a:
@@ -1441,6 +1457,81 @@ def Task.word(s: M.TaskState) -> String:
     case M.TaskCancelled{}:
       "cancelled"
 
+# Launched threads
+# ----------------
+# A thread started with thread_launch links back to its launcher the way a
+# delegated child links to its parent (every client's "parent" row), and
+# its launcher lists it with its state (subs.bend's Subs.launched). A
+# launcher is named as the person knows it: a bot by its name, a thread by
+# its title (law launched_by_bot_named).
+
+def Launched.title(+t: String) -> String:
+  Bool.pick(String, String.is_empty(t), "a thread on another machine", t)
+
+def Launched.bot(m: Maybe<&2, BT.Bot>, +st: M.State, +id: String) -> String:
+  match m:
+    case Some{+b}:
+      BT.Bot.name(b)
+    case None{}:
+      Launched.title(Tasks.title(st, id))
+
+# the launcher's name ("" for a thread nobody launched)
+def Launched.name(+st: M.State, +by: String) -> String:
+  Bool.pick(String, String.is_empty(by), "", Launched.bot(BT.World.of_thread(M.State.bots(st), by), st, by))
+
+# where a thread's link row goes: the parent that delegated it, else who
+# launched it ("" for neither)
+def Tasks.up(+st: M.State, +thread: String) -> String:
+  Bool.pick(String, String.is_empty(Tasks.parent(st, thread)), M.Launch.by(st, thread), Tasks.parent(st, thread))
+
+# the row's words
+def Tasks.up.label(+st: M.State, +thread: String, +p: String) -> String:
+  Bool.pick(String, String.is_empty(Tasks.parent(st, thread)), "← launched by " ++ Launched.name(st, p), "← delegated by " ++ Tasks.title(st, p))
+
+# a launched thread's state as its launcher's list says it
+def Launched.word.k(t: M.TurnState, +pending: Nat) -> String:
+  match t:
+    case M.Running{}:
+      "running"
+    case M.Failed{}:
+      "failed"
+    case M.Interrupted{}:
+      "stopped"
+    case M.Completed{}:
+      Bool.pick(String, Nat.is_gt(pending, 0n), "needs you", "done")
+    case _:
+      Bool.pick(String, Nat.is_gt(pending, 0n), "needs you", "idle")
+
+def Launched.word(t: M.Thread) -> String:
+  match t:
+    case M.Thread{_, _, _, _, _, turn, +pending, _, _, _, _, _, _, _, _, _, _, _, _, _, _}:
+      Launched.word.k(turn, pending)
+
+# its row's second line: "launched · <model>"
+def Launched.who(t: M.Thread) -> String:
+  match t:
+    case M.Thread{_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, +pr, +mo, _, _, _, _}:
+      "launched · " ++ Models.label(pr, mo)
+
+# at work or waiting on the person
+def Launched.live.k(t: M.TurnState, +pending: Nat) -> Bool:
+  match t:
+    case M.Running{}:
+      True{}
+    case _:
+      Nat.is_gt(pending, 0n)
+
+def Launched.live(t: M.Thread) -> Bool:
+  match t:
+    case M.Thread{_, _, _, _, _, turn, +pending, _, _, _, _, _, _, _, _, _, _, _, _, _, _}:
+      Launched.live.k(turn, pending)
+
+# still there to show: made, not deleted or archived
+def Launched.shown(t: M.Thread, +id: String) -> Bool:
+  match t:
+    case M.Thread{+i, _, _, _, _, _, _, archived, _, _, _, _, _, _, _, _, _, _, _, _, deleted}:
+      Bool.and(String.eq(i, id), Bool.not(Bool.or(archived, deleted)))
+
 # Asks
 # ----
 
@@ -1506,7 +1597,7 @@ def PSlot.rows(xs: List<&2, PSlot>) -> List<&2, SRow>:
 # Side.* answer by walking the state (laws side_*_ix_eq, subs_count_ix_eq).
 
 type SIx is Data:
-  SIx{by: Map<&2, List<&2, M.Thread>>, asks: Map<&2, List<&2, M.Ask>>, kids: Map<&2, Nat>}
+  SIx{by: Map<&2, List<&2, M.Thread>>, asks: Map<&2, List<&2, M.Ask>>, kids: Map<&2, Nat>, work: Map<&2, Nat>}
 
 def SIx.push.k(r: Map<&2, List<&2, M.Thread>> & List<&2, M.Thread>, +k: String, t: M.Thread) -> Map<&2, List<&2, M.Thread>>:
   (m, xs) = r
@@ -1550,7 +1641,7 @@ def SIx.asks.go(as: List<&2, M.Ask>, m: Map<&2, List<&2, M.Ask>>) -> Map<&2, Lis
 # parent, not in their project)
 def Side.ix(+st: M.State) -> SIx:
   SIx{SIx.by.go(List.reverse(&2, M.Thread, Kids.keep(Ui.threads(st), Kids.set(st))), Map.new(&2, List<&2, M.Thread>)),
-    SIx.asks.go(List.reverse(&2, M.Ask, M.Asks.all(st)), Map.new(&2, List<&2, M.Ask>)), M.Work.kids.map(st)}
+    SIx.asks.go(List.reverse(&2, M.Ask, M.Asks.all(st)), Map.new(&2, List<&2, M.Ask>)), M.Work.kids.map(st), M.Work.rows.map(st)}
 
 def SIx.list.k(r: Map<&2, List<&2, M.Thread>> & List<&2, M.Thread>) -> List<&2, M.Thread>:
   (_, xs) = r
@@ -1558,7 +1649,7 @@ def SIx.list.k(r: Map<&2, List<&2, M.Thread>> & List<&2, M.Thread>) -> List<&2, 
 
 def SIx.mine(+ix: SIx, +pid: String) -> List<&2, M.Thread>:
   match ix:
-    case SIx{by, _, _}:
+    case SIx{by, _, _, _}:
       SIx.list.k(Map.get(List<&2, M.Thread>, Nil{}, by, pid))
 
 def SIx.asks.k(r: Map<&2, List<&2, M.Ask>> & List<&2, M.Ask>) -> List<&2, M.Ask>:
@@ -1568,14 +1659,20 @@ def SIx.asks.k(r: Map<&2, List<&2, M.Ask>> & List<&2, M.Ask>) -> List<&2, M.Ask>
 # a thread's open asks
 def SIx.open(+ix: SIx, +th: String) -> List<&2, M.Ask>:
   match ix:
-    case SIx{_, as, _}:
+    case SIx{_, as, _, _}:
       SIx.asks.k(Map.get(List<&2, M.Ask>, Nil{}, as, th))
 
 # a parent's unfinished child tasks
 def SIx.kids(+ix: SIx, +th: String) -> Nat:
   match ix:
-    case SIx{_, _, ks}:
+    case SIx{_, _, ks, _}:
       M.Work.kids.at.k(Map.get(Nat, 0n, ks, th))
+
+# a thread's own rows, background and watched (Work.rows, from the index)
+def SIx.work(+ix: SIx, +th: String) -> Nat:
+  match ix:
+    case SIx{_, _, _, wk}:
+      M.Work.kids.at.k(Map.get(Nat, 0n, wk, th))
 
 def Side.latest(ts: List<&2, M.Thread>, +acc: Nat) -> Nat:
   match ts:
@@ -2096,6 +2193,31 @@ def Skills.of.k(dollar: Bool, +sel: String, +dr: Map<&2, String>, +nf: Map<&2, S
 def Skills.of(+sel: String, +dr: Map<&2, String>, +nf: Map<&2, String>) -> List<&2, SkillRow>:
   Skills.of.k(String.starts_with(Skills.token(Str.get(dr, sel)), "$"), sel, dr, nf)
 
+# Slash commands: a draft that is one word starting with `/` offers the
+# commands (slash.bend; Claude's own only in a Claude thread) and then the
+# thread's skills, as `$name` rows, whose name starts with what follows
+def Slash.rows(cs: List<&2, SL.Cmd>) -> List<&2, SkillRow>:
+  match cs:
+    case Nil{}:
+      Nil{}
+    case SL.Cmd{n, a} <> t:
+      SkillRow{n, a, False{}} <> Slash.rows(t)
+
+def Slash.of(claude: Bool, +sel: String, +dr: Map<&2, String>, +nf: Map<&2, String>) -> List<&2, SkillRow>:
+  List.take(&2, SkillRow, List.append(&2, SkillRow, Slash.rows(SL.Slash.cmds(claude, String.drop(Skills.token(Str.get(dr, sel)), 1n))),
+    Skills.offer(String.eq(Str.get(nf, "skills.for"), sel), Str.get(nf, "skills"), String.drop(Skills.token(Str.get(dr, sel)), 1n))), 8n)
+
+def Skills.all.k(slash: Bool, +st: M.State, +sel: String, +dr: Map<&2, String>, +nf: Map<&2, String>) -> List<&2, SkillRow>:
+  match slash:
+    case True{}:
+      Slash.of(String.eq(M.Thread.provider(Ui.thread(st, sel)), "claude"), sel, dr, nf)
+    case False{}:
+      Skills.of(sel, dr, nf)
+
+# what the composer offers now: slash commands, skills or references
+def Skills.all(+st: M.State, +sel: String, +dr: Map<&2, String>, +nf: Map<&2, String>) -> List<&2, SkillRow>:
+  Skills.all.k(SL.Slash.typing(Str.get(dr, sel)), st, sel, dr, nf)
+
 # The row the arrow keys have moved to: info "sk.at" (its index), kept
 # for the draft it was moved on ("sk.on", thread and text); any other
 # draft starts at the first row. Enter or Tab takes it.
@@ -2125,10 +2247,23 @@ def Skills.mark(rs: List<&2, SkillRow>, +k: Nat) -> List<&2, SkillRow>:
 def Skills.marked(+rs: List<&2, SkillRow>, +at: Nat) -> List<&2, SkillRow>:
   Skills.mark(rs, Nat.add(Bool.pick(Nat, Nat.is_lt(at, List.length(&2, SkillRow, rs)), at, 0n), 1n))
 
+def Ui.skills.k(shut: Bool, +st: M.State, +sel: String, +dr: Map<&2, String>, +nf: Map<&2, String>) -> List<&2, SkillRow>:
+  match shut:
+    case True{}:
+      Nil{}
+    case False{}:
+      Skills.marked(Skills.all(st, sel, dr, nf), Skills.at.k(sel, dr, nf))
+
+# what the composer shows: the rows, the highlighted one marked; Esc shuts
+# the menu ("skill-close", info "sk.off" is the draft it was shut on) and
+# it stays shut until the draft changes (the web reads this too)
+def Skills.shown(+st: M.State, +sel: String, +dr: Map<&2, String>, +nf: Map<&2, String>) -> List<&2, SkillRow>:
+  Ui.skills.k(String.eq(Str.get(nf, "sk.off"), Skills.on(sel, Str.get(dr, sel))), st, sel, dr, nf)
+
 def Ui.skills(u: Ui) -> List<&2, SkillRow>:
   match u:
-    case Ui{_, +sel, +dr, _, _, _, _, _, _, _, _, _, _, _, +nf, _, _}:
-      Skills.marked(Skills.of(sel, dr, nf), Skills.at.k(sel, dr, nf))
+    case Ui{+st, +sel, +dr, _, _, _, _, _, _, _, _, _, _, _, +nf, _, _}:
+      Skills.shown(st, sel, dr, nf)
 
 def Skills.lit(rs: List<&2, SkillRow>) -> String:
   match rs:
@@ -2180,15 +2315,16 @@ def Skills.pick(+rs: List<&2, SkillRow>, +v: String) -> String:
 def Skills.complete(+draft: String, +word: String) -> String:
   String.take(draft, Nat.sub(String.length(draft), String.length(Skills.token(draft)))) ++ word ++ " "
 
+# the composer keeps the keyboard (the web draws the page again)
 def Ui.skill.k(+word: String, +u: Ui) -> Act:
-  Bool.pick(Act, String.is_empty(word), Act{u, Nil{}}, Ui.draft.set(u, Skills.complete(Ui.draft_text(u), word)))
+  Bool.pick(Act, String.is_empty(word), Act{u, Nil{}}, Ui.also(Ui.draft.set(u, Skills.complete(Ui.draft_text(u), word)), [Focus{"composer"}]))
 
 # complete the word being typed
 def Ui.skill(+u: Ui, +v: String) -> Act:
   Ui.skill.k(Skills.pick(Ui.skills(u), v), u)
 
 def Skills.need(+u: Ui) -> Bool:
-  Bool.and(Skills.typing(Ui.draft_text(u)), Bool.not(String.eq(Ui.info(u, "skills.for"), Ui.sel(u))))
+  Bool.and(Bool.or(Skills.typing(Ui.draft_text(u)), SL.Slash.typing(Ui.draft_text(u))), Bool.not(String.eq(Ui.info(u, "skills.for"), Ui.sel(u))))
 
 # Reasoning effort in the composer
 # --------------------------------
@@ -2602,6 +2738,19 @@ def Palette.kind(+a: String) -> String:
 # Row status
 # ----------
 
+# the head of an approval card, one text for every client: "Send this email?"
+# for gmail_send ("Send this draft?" when its detail starts with "Draft:"),
+# "Create/Change/Delete this event?" for calendar_create/update/delete,
+# "Allow <tool>?" for any other tool
+def Ask.head.tool(+tool: String, +d: String) -> String:
+  Bool.pick(String, String.eq(tool, "gmail_send"), Bool.pick(String, String.starts_with(d, "Draft:"), "Send this draft?", "Send this email?"),
+    Bool.pick(String, String.eq(tool, "calendar_create"), "Create this event?",
+      Bool.pick(String, String.eq(tool, "calendar_update"), "Change this event?",
+        Bool.pick(String, String.eq(tool, "calendar_delete"), "Delete this event?", "Allow " ++ tool ++ "?"))))
+
+def Ask.head(+k: String, +tool: String, +d: String) -> String:
+  Bool.pick(String, String.eq(k, "plan"), "Proposed plan", Bool.pick(String, String.eq(k, "input"), "The agent asks", Ask.head.tool(tool, d)))
+
 def Asks.kind(as: List<&2, M.Ask>, +k: String) -> Bool:
   match as:
     case Nil{}:
@@ -2649,7 +2798,7 @@ def Side.status.ix(+ix: SIx, +st: M.State, t: M.Thread) -> M.Status:
 
 def Side.phase.ix.k(+st: M.State, +ix: SIx, +id: String, turn: M.TurnState, +pending: Nat, +as: List<&2, M.Ask>) -> M.Phase:
   M.Phase.of(Bool.or(Nat.is_gt(pending, 0n), Asks.kind(as, "approval")),
-    Bool.or(Asks.kind(as, "input"), Asks.kind(as, "plan")), Nat.add(SIx.kids(ix, id), M.Work.rows(st, id)), turn,
+    Bool.or(Asks.kind(as, "input"), Asks.kind(as, "plan")), Nat.add(SIx.kids(ix, id), SIx.work(ix, id)), turn,
     M.Queue.waiting(st, id))
 
 # Side.phase from the index (law side_phase_ix_eq)
@@ -2871,6 +3020,10 @@ def Side.demo() -> M.State:
     M.AskOpened{"a1", "t1", "approval", "Bash", "ls", "", 14n}, M.AskOpened{"a2", "t2", "input", "", "?", "", 15n}, M.AskOpened{"a3", "t3", "plan", "", "p", "", 16n},
     M.AskClosed{"a3", "yes", 17n}], M.State.empty())
 
+# the same with background rows on t1 (two) and watched work on t4
+def Side.demo.work() -> M.State:
+  M.State.replay([M.SettingSet{"bg.t1", "k1\tsleeping", 20n}, M.SettingSet{"watch.t1", "w1\twatching", 21n}, M.SettingSet{"watch.t4", "w2\tx", 22n}], Side.demo())
+
 def Side.phases(ts: List<&2, M.Thread>, +st: M.State) -> List<&2, M.Phase>:
   match ts:
     case Nil{}:
@@ -3019,12 +3172,25 @@ def Menu.kind(+m: String) -> String:
 def Menu.id(+m: String) -> String:
   String.drop(m, 2n)
 
+# a bot's menu ("bot-menu id", kept as "b:<id>"): the person makes a bot
+# of this machine the uberbot, or not (core/uber.bend)
+def Menu.bot(+st: M.State, +id: String) -> List<&2, MItem>:
+  Bool.pick(List<&2, MItem>, UB.Uber.is(st, id), [MItem{"Not uberbot", "uber-demote", "", ""}],
+    Bool.pick(List<&2, MItem>, UB.Uber.live(st, id), [MItem{"Make uberbot", "uber-promote", id, ""}], Nil{}))
+
+def Menu.items.b(bot: Bool, +u: Ui, +id: String) -> List<&2, MItem>:
+  match bot:
+    case True{}:
+      Menu.bot(Side.st(u), id)
+    case False{}:
+      Menu.thread(Side.st(u), Side.now(u), id, String.eq(Ui.scratch(u, "@del"), id))
+
 def Menu.items.t(file: Bool, +u: Ui, +id: String) -> List<&2, MItem>:
   match file:
     case True{}:
       Menu.file(id)
     case False{}:
-      Menu.thread(Side.st(u), Side.now(u), id, String.eq(Ui.scratch(u, "@del"), id))
+      Menu.items.b(String.eq(Menu.kind(Menu.open(u)), "b"), u, id)
 
 def Menu.items.k(thread: Bool, +u: Ui, +id: String, rich: Bool) -> List<&2, MItem>:
   match thread:
@@ -3040,7 +3206,8 @@ def Menu.items(+u: Ui, rich: Bool) -> List<&2, MItem>:
 # its heading: the thread's title, the project's name or the file's path
 def Menu.title(+u: Ui) -> String:
   Bool.pick(String, String.eq(Menu.kind(Menu.open(u)), "t"), Active.title(Ui.thread(Side.st(u), Menu.id(Menu.open(u)))),
-    Bool.pick(String, String.eq(Menu.kind(Menu.open(u)), "f"), Menu.id(Menu.open(u)), Ui.project_title(Side.st(u), Menu.id(Menu.open(u)))))
+    Bool.pick(String, String.eq(Menu.kind(Menu.open(u)), "f"), Menu.id(Menu.open(u)),
+      Bool.pick(String, String.eq(Menu.kind(Menu.open(u)), "b"), BT.Bot.name(BT.World.bot(M.State.bots(Side.st(u)), Menu.id(Menu.open(u)))), Ui.project_title(Side.st(u), Menu.id(Menu.open(u))))))
 
 # opening one disarms any delete or remove; the same again shuts it
 def Menu.set(+u: Ui, +m: String) -> Ui:
@@ -3048,7 +3215,7 @@ def Menu.set(+u: Ui, +m: String) -> Ui:
 
 def Menu.actions() -> List<&2, String>:
   ["row-menu", "proj-menu", "menu-close", "row-pin", "row-unpin", "row-archive", "row-unarchive", "side-older", "side-settled",
-   "file-menu", "file-open", "file-reveal", "file-copy", "row-rename", "rename-save", "rename-no"]
+   "file-menu", "file-open", "file-reveal", "file-copy", "row-rename", "rename-save", "rename-no", "bot-menu"]
 
 # a file link's path where the hub finds it: in the selected thread's folder
 # when relative (core/links.bend's Link.file.abs)
@@ -3131,6 +3298,8 @@ def Menu.act.k(i: Nat, +u: Ui, +value: String) -> Act:
       Ren.save(u, value)
     case 15n:
       Act{Ren.clear(u), Nil{}}
+    case 16n:
+      Act{Menu.set(u, "b:" ++ value), Nil{}}
     case _:
       Menu.shut(Ui.rpc(u, "thread.unarchive", [J.KV{"thread", J.Str{value}}]))
 
@@ -3294,6 +3463,10 @@ def Btw.reply.of(+u: Ui) -> String:
 def Btw.text(+a: String) -> String:
   Bool.pick(String, String.is_empty(a), "Thinking…", a)
 
+# the composer keeps the keyboard (the web draws the page again)
+def Skills.close(+u: Ui) -> Act:
+  Act{Ui.info_set(u, "sk.off", Skills.on(Ui.sel(u), Ui.draft_text(u))), [Focus{"composer"}]}
+
 def Skills.want(a: Act) -> Act:
   match a:
     case Act{+u, cs}:
@@ -3313,10 +3486,22 @@ def Refs.want(a: Act) -> Act:
     case Act{+u, cs}:
       Act{Refs.fill(RF.Refs.typing(Skills.token(Ui.draft_text(u))), u), cs}
 
+# an edit of the draft opens a menu Esc shut again (the same text sent
+# again leaves it shut)
+def Skills.reopen.k(same: Bool, +u: Ui) -> Ui:
+  match same:
+    case True{}:
+      u
+    case False{}:
+      Ui.info_set(u, "sk.off", "")
+
+def Skills.reopen(+u: Ui, +text: String) -> Ui:
+  Skills.reopen.k(String.eq(Ui.draft_text(u), text), u)
+
 # the selected thread's draft; typing a `$` fetches its skills once, a
 # reference being typed is looked up
-def Ui.draft(u: Ui, text: String) -> Act:
-  Refs.want(Skills.want(Ui.draft.set(u, text)))
+def Ui.draft(u: Ui, +text: String) -> Act:
+  Refs.want(Skills.want(Ui.draft.set(Skills.reopen(u, text), text)))
 
 # What the machine says about a provider: its CLI version ("" when it is
 # not installed) and a label per model
@@ -3328,13 +3513,13 @@ def Models.about(+info: String, +provider: String) -> J.Json:
 def Effort.chips(+info: String, +provider: String, +model: String) -> List<&2, String>:
   Effort.chips.of(Effort.known(J.Json.get(J.Json.get_obj(Models.about(info, provider), "efforts"), Bool.pick(String, String.is_empty(model), "default", model)), provider))
 
-# The picker's chips: the providers first ("@claude", "@codex", "@grok";
+# The picker's chips: the providers first ("@claude", "@codex", "@grok", "@muse";
 # a thread goes on with another between turns, V2's provider switch),
 # then the efforts its model takes. One chip row and one action for all
 # clients: a chip's value starting with "@" is a provider.
 
 def Chip.providers() -> List<&2, String>:
-  ["@claude", "@codex", "@grok"]
+  ["@claude", "@codex", "@grok", "@muse", "@antigravity"]
 
 def Chip.all(+info: String, +provider: String, +model: String) -> List<&2, String>:
   List.append(&2, String, Chip.providers(), Effort.chips(info, provider, model))
@@ -4250,6 +4435,15 @@ def Fm.act(i: Nat, +u: Ui, +value: String) -> Act:
       Lfocus.pick(u, value)
     case 10n:
       Lfocus.mode(u, value)
+    case 14n:
+      Ui.rpc(u, "lock.release", [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"name", J.Str{value}}])
+    case 15n:
+      Ui.rpc(u, "lock.cancel", [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"name", J.Str{value}}])
+    case 12n:
+      Ui.rpc(u, "wake.cancel", [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"id", J.Str{value}}])
+    # (a restart waiting for a safe point is cancelled: the plane's row)
+    case 13n:
+      Ui.rpc(u, "deploy.cancel", Nil{})
     case _:
       Act{u, Nil{}}
 
@@ -4440,6 +4634,44 @@ def Solid.off.key(+u: Ui) -> String:
 def Solid.off(+u: Ui) -> U32:
   Maybe.default(&2, U32, U32.read(Ui.scratch(u, Solid.off.key(u))), 0)
 
+# a sheet picked while a comparison shows: that sheet compared (the same
+# versions, the same layers); anything else as picked
+def Rv.sheet.k(cmp: Bool, +cur: String, +file: String) -> String:
+  match cmp:
+    case True{}:
+      HI.Hist.sheet(cur, file)
+    case False{}:
+      file
+
+def Rv.sheet(+cur: String, +file: String) -> String:
+  Rv.sheet.k(Bool.and(Nat.is_eq(HI.Hist.kind(cur), 2n), Bool.not(String.is_empty(file))), cur, file)
+
+# back on the Board or Schematic tab while a comparison of that kind is
+# open (the Review tab between): it shows again as it was (Old, Diff or
+# New); else the project's own file ("")
+def Rv.back.k(same: Bool, +u: Ui) -> String:
+  match same:
+    case True{}:
+      +bits = Maybe.default(&2, U32, U32.read(Ui.view_get(u, "cmp.bits")), 0)
+      Bool.pick(String, String.eq(Ui.view_get(u, "cmp.as"), "old"), Ui.view_get(u, "cmp.a"),
+        Bool.pick(String, String.eq(Ui.view_get(u, "cmp.as"), "new"), Ui.view_get(u, "cmp.b"), HI.Hist.diff.on(Ui.view_get(u, "cmp.a"), Ui.view_get(u, "cmp.b"), bits)))
+    case False{}:
+      ""
+
+def Rv.back(+u: Ui, +kind: String) -> String:
+  Rv.back.k(Bool.and(Bool.not(String.is_empty(Ui.view_get(u, "cmp.a"))),
+    Bool.and(Bool.or(String.eq(kind, "board"), String.eq(kind, "schematic")),
+      Nat.is_eq(HI.Hist.ext(HI.Hist.family(Ui.view_get(u, "cmp.f"))), Bool.pick(Nat, String.eq(kind, "schematic"), 1n, 0n)))), u)
+
+# the window's tab picked: the same, keeping a comparison (Rv.back)
+def Ui.view_pick.p(u: Ui, +kind: String, +path: String) -> Ui:
+  match u:
+    case Ui{st, +sel, dr, live, op, on, now, ad, pa, v, rid, w, er, note, +nf, ob, tr}:
+      Ui{st, sel, dr, live, op, on, now, ad, pa, v, rid, w, er, note, Viewer.put(nf, sel, kind, path), ob, tr}
+
+def Ui.view_pick.back(+u: Ui, +kind: String) -> Ui:
+  Ui.view_pick.p(u, kind, Rv.back(u, kind))
+
 # "mech" opens Mech (the part in 3D), "mech-part" shows another part,
 # "mech-3d" a part in 3D, "mech-refresh" asks for the parts again,
 # "mech-renders" shows a part's pictures, "mech-render" asks the hub to
@@ -4463,9 +4695,9 @@ def Mpage.act(i: Nat, +u: Ui, +value: String) -> Act:
       Ui.rpc(Ui.scratch_set(Ui.scratch_set(u, "@mech.busy:" ++ Ui.sel(u), value), "@mech.err:" ++ Ui.sel(u), ""), "mech.render",
         [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"path", J.Str{value}}])
     case 6n:
-      Act{Ui.view_put(u, value, ""), Nil{}}
+      Act{Ui.view_put(u, value, Rv.back(u, value)), Nil{}}
     case 7n:
-      Act{Ui.view_put(u, "schematic", value), Nil{}}
+      Act{Ui.view_put(u, "schematic", Rv.sheet(Ui.view_get(u, "view.path"), value)), Nil{}}
     case 8n:
       Act{Ui.scratch_set(u, Solid.off.key(u), U32.show(U32.xor(Solid.off(u), U32.shln(1, U32.to_nat(Maybe.default(&2, U32, U32.read(value), 31)))))), Nil{}}
     # (past the table: an action no one takes)
@@ -5074,7 +5306,7 @@ def Bots.say.clear(u: Ui) -> Ui:
       Ui{st, sel, Map.set(&2, String, Map.set(&2, String, dr, sel, ""), "@att:" ++ sel, ""), live, op, on, now, ad, pa, v, rid, w, er, note, nf, ob, tr}
 
 def Bots.say(u: Ui, +bot: String, text: String) -> Act:
-  Ui.also(Ui.rpc.keep.msg(Bots.say.clear(u), "bots.say", [J.KV{"bot", J.Str{bot}}, J.KV{"text", J.Str{text}}]), [Scroll{}])
+  Ui.also(Ui.rpc.keep.msg(Bots.say.clear(u), "bots.say", [J.KV{"bot", J.Str{bot}}, J.KV{"text", J.Str{text}}]), [ScrollEnd{}])
 
 def Ui.send.b(empty: Bool, b: Maybe<&2, BT.Bot>, u: Ui, text: String, +mode: String) -> Act:
   match empty b:
@@ -5130,18 +5362,45 @@ def Bots.views(u: Ui, +bot: String, +room: String, +remote: String) -> Ui:
   Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(u, "@bot", bot), "@room", room), "@remote", remote), "@del", ""), "@bot.want", ""), "@thread.want", "")
 
 # a bot shown: its thread is selected, its tab kept
-def Bots.select.k(m: Maybe<&2, BT.Bot>, u: Ui) -> Act:
+# the thread a bot's Chat tab shows: its own, but the uberbot's is where the
+# conversation runs now (ubersync.bend's Ub.chat: the holder's, as mirrored)
+def Bots.chat.of(+st: M.State, +id: String, +th: String) -> String:
+  Bool.pick(String, UB.Uber.is(st, id), US.Ub.chat(st), th)
+
+def Bots.select.k(m: Maybe<&2, BT.Bot>, +u: Ui) -> Act:
   match m:
     case Some{BT.Bot{+i, _, +th, _, _, _, _}}:
-      Act{Ui.flag_off(Bots.views(Bots.sel.set(u, th), i, "", ""), "settings"), [Focus{"composer"}, Scroll{}]}
+      Act{Ui.flag_off(Bots.views(Bots.sel.set(u, Bots.chat.of(Ui.state.of(u), i, th)), i, "", ""), "settings"), [Focus{"composer"}, ScrollEnd{}]}
     case None{}:
       Act{u, Nil{}}
 
 def Bots.select(+u: Ui, +id: String) -> Act:
   Bots.select.k(BT.World.find.id(BT.World.bot(M.State.bots(Ui.state.of(u)), id)), u)
 
-def Bots.room.select(u: Ui, +id: String) -> Act:
-  Act{Ui.flag_off(Bots.views(u, "", id, ""), "settings"), [Focus{"room-post"}, Scroll{}]}
+# Rooms seen: the setting room.seen.<room> is the time (seconds) the person
+# last opened it; its unread posts are those after it that they did not
+# write (a room never opened: those of the last day, not its whole past).
+# Opening a room with some unread says so; one with none sends nothing.
+def Rooms.seen(+u: Ui, +room: String) -> Nat:
+  Maybe.default(&2, Nat, Nat.read(M.Setting.get(Side.st(u), "room.seen." ++ room, "")), Nat.sub(Side.now(u), 86400n))
+
+def Rooms.unread(+u: Ui, +room: String) -> Nat:
+  BT.World.unread(M.State.bots(Side.st(u)), room, Rooms.seen(u, room))
+
+def Rooms.mark.go(a: Act, +id: String) -> Act:
+  match a:
+    case Act{+u, cs}:
+      Ui.also(Ui.setting(u, "room.seen." ++ id ++ "=" ++ Nat.show(Side.now(u))), cs)
+
+def Rooms.mark(+n: Nat, a: Act, +id: String) -> Act:
+  match n:
+    case 0n:
+      a
+    case 1n+_:
+      Rooms.mark.go(a, id)
+
+def Bots.room.select(+u: Ui, +id: String) -> Act:
+  Rooms.mark(Rooms.unread(u, id), Act{Ui.flag_off(Bots.views(u, "", id, ""), "settings"), [Focus{"room-post"}, ScrollEnd{}]}, id)
 
 # A bot elsewhere on one of the owner's machines opens there: the window
 # switches to that machine's hub and shows the bot with all its tabs (its
@@ -5193,6 +5452,25 @@ def Far.machine.k(+j: J.Json, +pname: String, +purl: String, +domain: String) ->
 
 def Far.machine(+j: J.Json, +pname: String, +purl: String) -> Maybe<&2, String>:
   Far.machine.k(j, pname, purl, J.Json.get_str(J.Json.get_obj(j, "self"), "domain", ""))
+
+# Notification Settings: the policy supplies values and defaults for every client.
+type NotifyRow is Data:
+  NotifyRow{name: String, note: String, on: String, key: String}
+
+def Notify.row(+st: M.State, name: String, note: String, +kind: String) -> NotifyRow:
+  NotifyRow{name, note, Bool.pick(String, NO.Policy.on(st, kind), "on", "off"), "notify." ++ kind}
+
+def Notify.rows(+st: M.State) -> List<&2, NotifyRow>:
+  [Notify.row(st, "Needs me", "Approvals, questions and anything an agent is blocked on until you act.", "needs"),
+   Notify.row(st, "Settled", "Work you gave a thread is finished, failed, or its branch merged. Once per piece of work.", "settled"),
+   Notify.row(st, "Reminders", "Reminders and digests you scheduled.", "reminders"),
+   Notify.row(st, "Everything", "Also every turn end and room exchange, as before.", "all")]
+
+def Notify.title() -> String:
+  "Notify me for"
+
+def Notify.lead() -> String:
+  "Phone and desktop alerts. The rest stays in the app as unread."
 
 # Pairing the owner's machines (Mate.*)
 # ----------------------------
@@ -5350,7 +5628,7 @@ def Mate.lead(+u: Ui) -> String:
     "Projects and threads on these machines sync into this sidebar in the background, so you never have to switch. Turn one off to keep it apart.")
 
 def Far.chat(u: Ui, +id: String) -> Act:
-  Act{Bots.views(u, "", "", id), [Focus{"remote-send"}, Scroll{}]}
+  Act{Bots.views(u, "", "", id), [Focus{"remote-send"}, ScrollEnd{}]}
 
 # "name\u001ftext": a form field
 def Bots.bfield.k(ps: List<&2, String>, u: Ui) -> Ui:
@@ -5366,11 +5644,20 @@ def Bots.bfield(u: Ui, +v: String) -> Ui:
 def Bots.flag(+u: Ui, +k: String) -> Ui:
   Ui.scratch_set(u, k, Bool.pick(String, String.eq(Ui.scratch(u, k), "1"), "", "1"))
 
+# the new bot form was opened by the tour's "Create my uberbot" (scratch
+# "@uber.new"): the request asks the hub to make the bot the uberbot too
+def Bots.uber.new(+u: Ui) -> List<&2, J.KV>:
+  Bool.pick(List<&2, J.KV>, String.eq(Ui.scratch(u, "@uber.new"), "1"), [J.KV{"uber", J.Flag{True{}}}], Nil{})
+
 def Bots.create(+u: Ui) -> Act:
-  Ui.rpc(Bots.fields.clear(Ui.scratch_set(u, "@bnew", ""), ["name", "persona"]), "bots.create",
-    [J.KV{"name", J.Str{String.trim(Bots.field(u, "name"))}}, J.KV{"persona", J.Str{Bots.field(u, "persona")}},
+  Ui.rpc(Bots.fields.clear(Ui.scratch_set(Ui.scratch_set(u, "@bnew", ""), "@uber.new", ""), ["name", "persona"]), "bots.create",
+    List.append(&2, J.KV, [J.KV{"name", J.Str{String.trim(Bots.field(u, "name"))}}, J.KV{"persona", J.Str{Bots.field(u, "persona")}},
      J.KV{"provider", J.Str{Bool.pick(String, String.is_empty(Bots.field(u, "provider")), M.Setting.get(Ui.state.of(u), "agent.provider", "claude"), Bots.field(u, "provider"))}},
-     J.KV{"model", J.Str{Bots.field(u, "model")}}])
+     J.KV{"model", J.Str{Bots.field(u, "model")}}], Bots.uber.new(u)))
+
+# the form's name field hint
+def Bots.name.hint(+u: Ui) -> String:
+  Bool.pick(String, String.eq(Ui.scratch(u, "@uber.new"), "1"), "Name your uberbot", "Name")
 
 def Bots.cur(+u: Ui) -> String:
   Ui.scratch(u, "@bot")
@@ -5456,7 +5743,7 @@ def Bots.room.post.k(empty: Bool, +u: Ui) -> Act:
     case True{}:
       Act{u, Nil{}}
     case False{}:
-      Ui.also(Ui.rpc.keep.msg(Ui.scratch_set(u, "@f.rpost", ""), "bots.post", [J.KV{"room", J.Str{Ui.scratch(u, "@room")}}, J.KV{"text", J.Str{Bots.field(u, "rpost")}}]), [Scroll{}])
+      Ui.also(Ui.rpc.keep.msg(Ui.scratch_set(u, "@f.rpost", ""), "bots.post", [J.KV{"room", J.Str{Ui.scratch(u, "@room")}}, J.KV{"text", J.Str{Bots.field(u, "rpost")}}]), [ScrollEnd{}])
 
 def Bots.room.post(+u: Ui) -> Act:
   Bots.room.post.k(String.is_empty(String.trim(Bots.field(u, "rpost"))), u)
@@ -5466,7 +5753,7 @@ def Bots.remote.send.k(empty: Bool, +u: Ui) -> Act:
     case True{}:
       Act{u, Nil{}}
     case False{}:
-      Ui.also(Ui.rpc.keep.msg(Ui.scratch_set(u, "@f.rtext", ""), "bots.tell", [J.KV{"to", J.Str{Ui.scratch(u, "@remote")}}, J.KV{"text", J.Str{Bots.field(u, "rtext")}}]), [Scroll{}])
+      Ui.also(Ui.rpc.keep.msg(Ui.scratch_set(u, "@f.rtext", ""), "bots.tell", [J.KV{"to", J.Str{Ui.scratch(u, "@remote")}}, J.KV{"text", J.Str{Bots.field(u, "rtext")}}]), [ScrollEnd{}])
 
 def Bots.remote.send(+u: Ui) -> Act:
   Bots.remote.send.k(String.is_empty(String.trim(Bots.field(u, "rtext"))), u)
@@ -5494,24 +5781,50 @@ def Bots.space.link.k(ps: List<&2, String>, u: Ui) -> Act:
 def Bots.space.link(u: Ui, +v: String) -> Act:
   Bots.space.link.k(String.split(v, '\u{1f}'), u)
 
+# What the form's When field says, in the person's zone: a schedule, a
+# one-time phrase, or what is wrong with it (core/sched.bend's Sched.hint)
+def Routine.hint(+u: Ui) -> String:
+  SC.Sched.hint(Ui.state.of(u), Bots.field(u, "ocron"), Side.now(u), 0n, True{})
+
+# the key the text goes under: a schedule is `cron`, a time `at`
+def Routine.key.k(cron: Bool, at: Bool) -> String:
+  match cron at:
+    case True{} _:
+      "cron"
+    case False{} True{}:
+      "at"
+    case False{} False{}:
+      "cron"
+
+def Routine.key(+u: Ui, +text: String) -> String:
+  Routine.key.k(BT.Maybe.is(CR.Cron, CR.Cron.parse(text)), BT.Maybe.is(Nat, WH.When.parse(text, Side.now(u), SC.Sched.person(Ui.state.of(u), 0n, True{}))))
+
 def Bots.routine.save(+u: Ui) -> Act:
   Ui.rpc(Bots.fields.clear(Ui.scratch_set(u, "@onew", ""), ["oid", "oname", "ocron", "oprompt"]), "bots.routine",
     [J.KV{"bot", J.Str{Bots.cur(u)}}, J.KV{"routine", J.Str{Bots.field(u, "oid")}}, J.KV{"name", J.Str{Bool.pick(String, String.is_empty(Bots.field(u, "oname")), "routine", Bots.field(u, "oname"))}},
-     J.KV{"cron", J.Str{Bots.field(u, "ocron")}}, J.KV{"prompt", J.Str{Bots.field(u, "oprompt")}}, J.KV{"on", J.Flag{True{}}}])
+     J.KV{Routine.key(u, String.trim(Bots.field(u, "ocron"))), J.Str{String.trim(Bots.field(u, "ocron"))}}, J.KV{"prompt", J.Str{Bots.field(u, "oprompt")}}, J.KV{"on", J.Flag{True{}}}])
 
 def Bots.routine.of(+u: Ui, +id: String) -> BT.Routine:
   BT.World.routine(M.State.bots(Ui.state.of(u)), id)
 
 def Bots.routine.toggle(+u: Ui, r: BT.Routine) -> Act:
   match r:
-    case BT.Routine{i, b, n, c, p, on, _, _, _}:
-      Ui.rpc(u, "bots.routine", [J.KV{"bot", J.Str{b}}, J.KV{"routine", J.Str{i}}, J.KV{"name", J.Str{n}}, J.KV{"cron", J.Str{c}}, J.KV{"prompt", J.Str{p}}, J.KV{"on", J.Flag{Bool.not(on)}}])
+    case BT.Routine{i, b, n, c, p, on, _, _, _, _, _, _, _, _}:
+      Ui.rpc(u, "bots.routine", [J.KV{"bot", J.Str{b}}, J.KV{"routine", J.Str{i}}, J.KV{"name", J.Str{n}}, J.KV{"cron", J.Str{c}}, J.KV{"prompt", J.Str{p}}, J.KV{"on", J.Flag{Bool.not(on)}}, J.KV{"keep", J.Flag{True{}}}])
+
+def Routine.edit.when.k(once: Bool, rule: TZ.TzRule, +t: Nat, +c: String) -> String:
+  Bool.pick(String, once, String.take(TZ.Tz.iso(rule, t), 16n), c)
+
+# the When field of a routine being changed: its schedule, or a one-time
+# routine's moment as a local time ("2026-10-14T09:00")
+def Routine.edit.when(+s: M.State, +r: BT.Routine, +c: String) -> String:
+  Routine.edit.when.k(Nat.is_gt(BT.Routine.once(r), 0n), SC.Sched.person(s, 0n, True{}), BT.Routine.once(r), c)
 
 # a routine's fields into the form, to change it
-def Bots.routine.edit(u: Ui, r: BT.Routine) -> Ui:
+def Bots.routine.edit(+u: Ui, r: BT.Routine) -> Ui:
   match r:
-    case BT.Routine{i, _, n, c, p, _, _, _, _}:
-      Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(u, "@onew", "1"), "@f.oid", i), "@f.oname", n), "@f.ocron", c), "@f.oprompt", p)
+    case BT.Routine{+i, _, +n, +c, +p, _, _, _, _, _, _, _, _, _}:
+      Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(Ui.scratch_set(u, "@onew", "1"), "@f.oid", i), "@f.oname", n), "@f.ocron", Routine.edit.when(Ui.state.of(u), r, c)), "@f.oprompt", p)
 
 def Bots.hook.new(+u: Ui) -> Act:
   Ui.rpc(Bots.fields.clear(Ui.scratch_set(u, "@hook.secret", ""), ["hname"]), "bots.hook",
@@ -5539,6 +5852,36 @@ def Bots.google.rpc(+u: Ui, +op: String, +account: String) -> Act:
 def Bots.google.loop(+port: String) -> String:
   "http://127.0.0.1:" ++ port ++ "/oauth/google"
 
+# An account's signature (gmail_send and gmail_draft add it after the body):
+# the hub setting "gmail.sig.<address>". "sig-edit:<address>" opens it ("@gsig"
+# names the account, the field "gsig" holds its text), "sig-save" writes it
+# (an empty text removes it), "sig-cancel" shuts the editor.
+def Bots.sig.key(+a: String) -> String:
+  "gmail.sig." ++ a
+
+def Bots.sig.of(+u: Ui, +a: String) -> String:
+  M.Setting.get(Ui.state(u), Bots.sig.key(a), "")
+
+# the address whose signature is being edited ("" for none)
+def Bots.sig.editing(+u: Ui) -> String:
+  Ui.scratch(u, "@gsig")
+
+def Bots.sig.edit(+u: Ui, +a: String) -> Act:
+  Act{Ui.scratch_set(Ui.scratch_set(u, "@gsig", a), "@f.gsig", Bots.sig.of(u, a)), Nil{}}
+
+def Bots.sig.save.k(none: Bool, +u: Ui, +a: String) -> Act:
+  match none:
+    case True{}:
+      Act{u, Nil{}}
+    case False{}:
+      Ui.setting(Ui.scratch_set(Ui.scratch_set(u, "@gsig", ""), "@f.gsig", ""), Bots.sig.key(a) ++ "=" ++ Bots.field(u, "gsig"))
+
+def Bots.sig.save(+u: Ui) -> Act:
+  Bots.sig.save.k(String.is_empty(Bots.sig.editing(u)), u, Bots.sig.editing(u))
+
+def Bots.sig.cancel(+u: Ui) -> Act:
+  Act{Ui.scratch_set(Ui.scratch_set(u, "@gsig", ""), "@f.gsig", ""), Nil{}}
+
 def Bots.google.op(i: Nat, +u: Ui, +op: String) -> Act:
   match i:
     case 0n:
@@ -5547,13 +5890,20 @@ def Bots.google.op(i: Nat, +u: Ui, +op: String) -> Act:
       Bots.google.rpc.x(u, "connect", "", "", Bots.google.loop(String.drop(op, 8n)))
     case 2n:
       Bots.google.rpc.x(u, "finish", "", String.drop(op, 5n), "")
+    case 3n:
+      Bots.sig.edit(u, String.drop(op, 9n))
+    case 4n:
+      Bots.sig.save(u)
+    case 5n:
+      Bots.sig.cancel(u)
     case _:
       Bots.google.rpc(u, op, "")
 
 # "signout:<address>" signs one account out; "disconnect" signs out every one
 def Bots.google.at(+op: String) -> Nat:
   Bool.pick(Nat, String.starts_with(op, "signout:"), 0n,
-    Bool.pick(Nat, String.starts_with(op, "connect@"), 1n, Bool.pick(Nat, String.starts_with(op, "done:"), 2n, 3n)))
+    Bool.pick(Nat, String.starts_with(op, "connect@"), 1n, Bool.pick(Nat, String.starts_with(op, "done:"), 2n,
+      Bool.pick(Nat, String.starts_with(op, "sig-edit:"), 3n, Bool.pick(Nat, String.eq(op, "sig-save"), 4n, Bool.pick(Nat, String.eq(op, "sig-cancel"), 5n, 6n))))))
 
 def Bots.google(+u: Ui, +op: String) -> Act:
   Bots.google.op(Bots.google.at(op), u, op)
@@ -5882,8 +6232,9 @@ def Hs.at(+u: Ui, +ss: List<&2, HI.Step>) -> Nat:
 def Hs.diff(+u: Ui) -> Bool:
   String.eq(Hs.get(u, "hist.diff"), "1")
 
+# (a comparison on show, or one of its sides: "cmp.as:<t>" old or new)
 def Hs.cmp(+u: Ui) -> Bool:
-  Bool.and(Bool.not(String.is_empty(Hs.get(u, "cmp.a"))), Nat.is_eq(HI.Hist.kind(Hs.path(u)), 2n))
+  Bool.and(Bool.not(String.is_empty(Hs.get(u, "cmp.a"))), Bool.or(Nat.is_eq(HI.Hist.kind(Hs.path(u)), 2n), Bool.not(String.is_empty(Hs.get(u, "cmp.as")))))
 
 def Hs.playing(+u: Ui) -> Bool:
   Bool.not(String.is_empty(Hs.get(u, "hist.play")))
@@ -5900,7 +6251,7 @@ def Hs.keep.live(+u: Ui) -> Ui:
   Hs.keep(Nat.is_eq(HI.Hist.kind(Hs.path(u)), 0n), u, Hs.path(u))
 
 def Hs.clear.cmp(u: Ui) -> Ui:
-  Hs.set(Hs.set(Hs.set(Hs.set(u, "cmp.a", ""), "cmp.b", ""), "cmp.al", ""), "cmp.bl", "")
+  Hs.set(Hs.set(Hs.set(Hs.set(Hs.set(u, "cmp.a", ""), "cmp.b", ""), "cmp.al", ""), "cmp.bl", ""), "cmp.as", "")
 
 # show a step (as it was, or compared with the one before)
 def Hs.show(+u: Ui, +s: HI.Step, +k: Nat) -> Ui:
@@ -6098,10 +6449,14 @@ def Hs.row.steps(ss: List<&2, HI.Step>, +side: String, +es: List<&2, M.Entry>, +
 def Hs.ref.label(+r: HI.Ref) -> String:
   match r:
     case HI.Ref{+k, +l, _}:
-      Bool.pick(String, String.eq(k, "turn"), "Turn " ++ HI.Hist.at(List.reverse(&2, String, String.split(l, '/')), 0n), l)
+      Bool.pick(String, String.eq(k, "turn"), "Turn " ++ HI.Hist.at(List.reverse(&2, String, String.split(l, '/')), 0n),
+        Bool.pick(String, String.eq(k, "base"), "Branch point · " ++ l, l))
 
+# (a base is where the checked-out branch left the main one: compared with
+# it, a pull request's whole change; a tag is a release)
 def Hs.ref.kind(+k: String) -> String:
-  Bool.pick(String, String.eq(k, "head"), "the commit checked out", Bool.pick(String, String.eq(k, "branch"), "branch", Bool.pick(String, String.eq(k, "turn"), "this thread, at the end of a turn", "commit")))
+  Bool.pick(String, String.eq(k, "head"), "the commit checked out", Bool.pick(String, String.eq(k, "branch"), "branch", Bool.pick(String, String.eq(k, "turn"), "this thread, at the end of a turn",
+    Bool.pick(String, String.eq(k, "tag"), "tag", Bool.pick(String, String.eq(k, "base"), "where this branch left it", "commit")))))
 
 # (turn 0 is the thread before it began)
 def Hs.ref.sub(+k: String, +label: String) -> String:
@@ -6147,8 +6502,9 @@ def Hs.side.spec(+commit: String, +git: String, +top: String, +abs: String) -> S
 def Hs.cmp.side(+u: Ui, +side: String) -> String:
   Bool.pick(String, String.is_empty(Hs.get(u, "cmp." ++ side)), Hs.live.abs(u), Hs.get(u, "cmp." ++ side))
 
+# (on the layers "cmp.bits:<t>" names: the active layer's, 0 every one)
 def Hs.cmp.path(+u: Ui) -> String:
-  HI.Hist.diff(Hs.cmp.side(u, "a"), Hs.cmp.side(u, "b"))
+  HI.Hist.diff.on(Hs.cmp.side(u, "a"), Hs.cmp.side(u, "b"), Maybe.default(&2, U32, U32.read(Hs.get(u, "cmp.bits")), 0))
 
 def Hs.cmp.show(+u: Ui) -> Ui:
   Ui.scratch_set(Ui.view_put(u, Hs.kname(Hs.kind(u)), Hs.cmp.path(u)), "@cmp.menu", "")
@@ -6170,7 +6526,7 @@ def Hs.pick.k(bad: Bool, +u: Ui, +side: String, +spec: String, +label: String) -
     case True{}:
       Ui.error_set(u, "This file is not in the repository, so it cannot be compared.")
     case False{}:
-      Hs.cmp.show(Hs.cmp.fill(Hs.set(Hs.set(Hs.set(Hs.set(Hs.cmp.fresh(Hs.keep.live(u)), "hist.at", ""), "hist.play", ""), "cmp." ++ side, spec), "cmp." ++ side ++ "l", label)))
+      Hs.cmp.show(Hs.cmp.fill(Hs.set(Hs.set(Hs.set(Hs.set(Hs.set(Hs.cmp.fresh(Hs.keep.live(u)), "hist.at", ""), "hist.play", ""), "cmp." ++ side, spec), "cmp." ++ side ++ "l", label), "cmp.as", "")))
 
 def Hs.pick.v(+u: Ui, +xs: List<&2, String>) -> Ui:
   +side = Bool.pick(String, String.eq(HI.Hist.at(xs, 0n), "b"), "b", "a")
@@ -6194,24 +6550,546 @@ def Hs.menu.k(open: Bool, +u: Ui, +side: String) -> Act:
 def Hs.refs.has(+o: J.Json) -> Bool:
   Bool.not(String.eq(J.Json.show(Maybe.default(&2, J.Json, J.Json.get(J.Json.get_obj(o, "result"), "refs"), J.Null{})), "null"))
 
+# the project's own board and schematic are kept in the scratch too, which
+# a phone keeps across a relaunch: comments pin on them before the next
+# answer (Rc.file); empty answers leave what was kept
+def Hs.refs.keep.k(+k: String, +v: String, +u: Ui) -> Ui:
+  Bool.pick(Ui, String.is_empty(v), u, Ui.scratch_set(u, k, v))
+
+def Hs.refs.keep(u: Ui, +r: J.Json) -> Ui:
+  Hs.refs.keep.k("@rc.sch:" ++ J.Json.get_str(r, "thread", ""), J.Json.get_str(r, "sch", ""),
+    Hs.refs.keep.k("@rc.pcb:" ++ J.Json.get_str(r, "thread", ""), J.Json.get_str(r, "pcb", ""), u))
+
 def Hs.refs.store(has: Bool, u: Ui, +o: J.Json) -> Ui:
   match has:
     case True{}:
-      Ui.info_set(u, "refs:" ++ J.Json.get_str(J.Json.get_obj(o, "result"), "thread", ""), J.Json.show(J.Json.get_obj(o, "result")))
+      Hs.refs.keep(Ui.info_set(u, "refs:" ++ J.Json.get_str(J.Json.get_obj(o, "result"), "thread", ""), J.Json.show(J.Json.get_obj(o, "result"))), J.Json.get_obj(o, "result"))
     case False{}:
       u
 
+# Design review: comparing (docs/design-review.md)
+# -------------------------------------------------
+# Actions "rv-…" route here before the action table (Rv.act). A
+# comparison shows as Old, Diff or New ("rv-as": old, diff, new; kept as
+# "cmp.as:<t>", "" the diff): one canvas, the same family, so a flip only
+# changes what is drawn. "rv-bits" restricts its marks to some layers (the
+# clients send the active layer's, Rv.bits; 0 every layer). "rv-ref" asks
+# the hub for any commit, branch or tag typed in ("<side>\t<text>",
+# history.resolve), and its answer is picked like a menu row.
+
+# a side at the sheet on show (a sheet picked while Old or New shows keeps
+# its place when the flip moves on)
+def Rv.side.at(+u: Ui, +side: String) -> String:
+  HI.Hist.sheet(Hs.cmp.side(u, side), HI.Hist.family(Hs.path(u)))
+
+def Rv.diff.at(+u: Ui) -> String:
+  HI.Hist.diff.on(Rv.side.at(u, "a"), Rv.side.at(u, "b"), Maybe.default(&2, U32, U32.read(Hs.get(u, "cmp.bits")), 0))
+
+def Rv.as.path(+u: Ui, +as: String) -> String:
+  Bool.pick(String, String.eq(as, "old"), Rv.side.at(u, "a"), Bool.pick(String, String.eq(as, "new"), Rv.side.at(u, "b"), Rv.diff.at(u)))
+
+def Rv.as.k(on: Bool, +u: Ui, +as: String) -> Ui:
+  match on:
+    case True{}:
+      +v = Bool.pick(String, Bool.or(String.eq(as, "old"), String.eq(as, "new")), as, "")
+      Ui.view_put(Hs.set(u, "cmp.as", v), Hs.kname(Hs.kind(u)), Rv.as.path(u, v))
+    case False{}:
+      u
+
+def Rv.as(+u: Ui, +as: String) -> Ui:
+  Rv.as.k(Hs.cmp(u), u, as)
+
+# which of Old, Diff and New shows ("" none: no comparison)
+def Rv.showing(+u: Ui) -> String:
+  Bool.pick(String, Hs.cmp(u), Bool.pick(String, String.is_empty(Hs.get(u, "cmp.as")), "diff", Hs.get(u, "cmp.as")), "")
+
+# the layers a focus is about, as a comparison's bits (0 when no layer
+# stands out): the active one and those kept with it
+def Rv.bits(+kind: U32, +f: LY.Focus) -> U32:
+  Bool.pick(U32, Bool.and(LY.Lyr.on(f), Bool.not(U32.is_eq(kind, 1))), LY.Lyr.kept(kind, f), 0)
+
+def Rv.bits.k(diff: Bool, +u: Ui, +bits: String) -> Ui:
+  match diff:
+    case True{}:
+      Ui.view_put(Hs.set(u, "cmp.bits", bits), Hs.kname(Hs.kind(u)), Rv.diff.at(Hs.set(u, "cmp.bits", bits)))
+    case False{}:
+      Hs.set(u, "cmp.bits", bits)
+
+def Rv.bits.set(+u: Ui, +bits: String) -> Ui:
+  Rv.bits.k(Bool.and(Hs.cmp(u), String.is_empty(Hs.get(u, "cmp.as"))), u, Bool.pick(String, String.eq(bits, "0"), "", bits))
+
+def Rv.ref.ask(+u: Ui, +side: String, +text: String) -> Act:
+  Ui.rpc(Ui.scratch_set(u, "@cmp.menu", ""), "history.resolve", [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"side", J.Str{side}}, J.KV{"ref", J.Str{text}}])
+
+def Rv.ref.k(blank: Bool, +u: Ui, +side: String, +text: String) -> Act:
+  match blank:
+    case True{}:
+      Act{u, Nil{}}
+    case False{}:
+      Rv.ref.ask(u, side, text)
+
+def Rv.ref(+u: Ui, +xs: List<&2, String>) -> Act:
+  Rv.ref.k(String.is_empty(String.trim(HI.Hist.at(xs, 1n))), u, Bool.pick(String, String.eq(HI.Hist.at(xs, 0n), "b"), "b", "a"), String.trim(HI.Hist.at(xs, 1n)))
+
+# the hub's answer: {resolved: {thread, side, ref, commit, git, top}}, a
+# version picked for its side (on its own thread only)
+def Rv.reply.k(+o: J.Json, +u: Ui) -> Ui:
+  Bool.pick(Ui, String.eq(J.Json.get_str(o, "thread", ""), Ui.sel(u)),
+    Hs.pick(u, Hs.row.value(J.Json.get_str(o, "side", "a"), J.Json.get_str(o, "commit", ""), J.Json.get_str(o, "ref", ""), J.Json.get_str(o, "git", ""), J.Json.get_str(o, "top", ""))), u)
+
+def Rv.reply.has(+o: J.Json) -> Bool:
+  Bool.not(String.eq(J.Json.show(Maybe.default(&2, J.Json, J.Json.get(J.Json.get_obj(o, "result"), "resolved"), J.Null{})), "null"))
+
+def Rv.reply(has: Bool, u: Ui, +o: J.Json) -> Ui:
+  match has:
+    case True{}:
+      Rv.reply.k(J.Json.get_obj(J.Json.get_obj(o, "result"), "resolved"), u)
+    case False{}:
+      u
+
+# Design review: comments
+# -----------------------
+# Comments pinned to a place in a design (core/review.bend), the thread's
+# own: the person's and its agent's. Every client draws the pins of the
+# file on show (Rc.pins, where it draws the board or the schematic) and
+# opens one with "rv-pin" (its id; "" shuts it: "@rc.sel:<t>"). A right
+# click or a long press on a place asks to comment there: "rv-note" with
+# "x\ty\tlayer\titem" (mm in the file's coordinates, the layer's name, the
+# key of the item under it), kept as "@rc.at:<t>" while the text is
+# written (field "@f.rcnote"); "rv-note-send" sends it (review.comment, op
+# add), "rv-note-shut" forgets it. "rv-reply-send" answers the open one
+# (field "@f.rcreply"), "rv-resolve" and "rv-reopen" take its id. The
+# Review tab's Comments page lists them all.
+
+def Rc.all(+u: Ui) -> List<&2, RVW.Comment>:
+  RVW.Review.of_state(Ui.state(u), Ui.sel(u))
+
+# the file on show, from the thread's folder (as the agent names it)
+def Rc.rel.k(under: Bool, +abs: String, +root: String) -> String:
+  match under:
+    case True{}:
+      String.drop(abs, 1n+String.length(root))
+    case False{}:
+      abs
+
+def Rc.at(+u: Ui) -> String:
+  Ui.scratch(u, "@rc.at:" ++ Ui.sel(u))
+
+# (a viewer on the project's own board or schematic names no file: the
+# hub's history.refs answer does, Rc.sync asks for it once)
+def Rc.own(+u: Ui) -> String:
+  Ui.scratch(u, Bool.pick(String, Nat.is_eq(Hs.kind(u), 1n), "@rc.sch:", "@rc.pcb:") ++ Ui.sel(u))
+
+def Rc.file(+u: Ui) -> String:
+  Bool.pick(String, String.is_empty(HI.Hist.family(Ui.view_get(u, "view.path"))), Rc.own(u), HI.Hist.family(Ui.view_get(u, "view.path")))
+
+def Rc.rel(+u: Ui) -> String:
+  +abs = Rc.file(u)
+  Rc.rel.k(Bool.and(Bool.not(String.is_empty(Ui.root(u))), String.starts_with(abs, Ui.root(u) ++ "/")), abs, Ui.root(u))
+
+# whether the thread's board or schematic shows with no file named and the
+# hub has not been asked which it is (the "asked" mark lives in the info map
+# beside the answer, so a phone's kept state never keeps one without the
+# other)
+def Rc.need(+u: Ui) -> Bool:
+  Bool.and(Bool.and(Bool.not(String.is_empty(Ui.sel(u))), Bool.and(Nat.is_lt(Hs.kind(u), 2n), Bool.not(String.eq(Ui.view_get(u, "view.kind"), "review")))),
+    Bool.and(Bool.and(String.is_empty(HI.Hist.family(Ui.view_get(u, "view.path"))), String.is_empty(Rc.own(u))), String.is_empty(Ui.info(u, "rc.refs:" ++ Ui.sel(u)))))
+
+def Rc.sync.join(a: Act, cs: List<&2, Cmd>) -> Act:
+  match a:
+    case Act{u, ds}:
+      Act{u, List.append(&2, Cmd, cs, ds)}
+
+def Rc.sync.k(need: Bool, a: Act) -> Act:
+  match need a:
+    case True{} Act{+u, cs}:
+      Rc.sync.join(Ui.rpc(Ui.info_set(u, "rc.refs:" ++ Ui.sel(u), "1"), "history.refs", [J.KV{"thread", J.Str{Ui.sel(u)}}]), cs)
+    case False{} +x:
+      x
+
+# (only for a thread with comments to pin, or a note being started: other
+# threads ask nothing more)
+# (a phone back online asks at once: its kept state reopens the board with
+# no select, and the comments to pin may arrive only with the log)
+def Rc.sync.any(a: Act) -> Act:
+  match a:
+    case Act{+u, cs}:
+      Rc.sync.k(Rc.need(u), Act{u, cs})
+
+def Rc.sync.of(a: Act) -> Act:
+  match a:
+    case Act{+u, cs}:
+      Rc.sync.k(Bool.and(Rc.need(u), Bool.or(Bool.not(String.is_empty(Rc.at(u))), Bool.not(List.is_empty(&2, RVW.Comment, Rc.all(u))))), Act{u, cs})
+
+# (a note sent before the hub named the project's own file was kept with
+# no file: the viewer on that file shows it too)
+def Rc.pins.k(own: Bool, +u: Ui) -> List<&2, RVW.Pin>:
+  match own:
+    case True{}:
+      List.append(&2, RVW.Pin, RVW.Review.pins(Rc.all(u), Rc.rel(u), ""), RVW.Review.pins(Rc.all(u), "", ""))
+    case False{}:
+      RVW.Review.pins(Rc.all(u), Rc.rel(u), "")
+
+def Rc.pins(+u: Ui) -> List<&2, RVW.Pin>:
+  Rc.pins.k(Bool.and(String.is_empty(HI.Hist.family(Ui.view_get(u, "view.path"))), Bool.not(String.is_empty(Rc.rel(u)))), u)
+
+def Rc.sel(+u: Ui) -> String:
+  Ui.scratch(u, "@rc.sel:" ++ Ui.sel(u))
+
+# the one open: its words, who and where, its replies (each "text\u001fby"),
+# whether it is resolved
+type RcOpen is Data:
+  RcOpen{id: String, text: String, by: String, place: String, resolved: Bool, replies: List<&2, String>}
+
+def Rc.reply.lines(rs: List<&2, RVW.Comment>) -> List<&2, String>:
+  match rs:
+    case Nil{}:
+      Nil{}
+    case +r <> t:
+      (RVW.Rv.text(r) ++ SCon{Chr{31}, SNil{}} ++ RVW.Rv.by(r)) <> Rc.reply.lines(t)
+
+def Rc.find(cs: List<&2, RVW.Comment>, +id: String) -> Maybe<&2, RVW.Comment>:
+  match cs:
+    case Nil{}:
+      None{}
+    case +c <> t:
+      Bool.pick(Maybe<&2, RVW.Comment>, String.eq(RVW.Rv.id(c), id), Some{c}, Rc.find(t, id))
+
+def Rc.open.k(m: Maybe<&2, RVW.Comment>, +all: List<&2, RVW.Comment>) -> Maybe<&2, RcOpen>:
+  match m:
+    case Some{+c}:
+      Some{RcOpen{RVW.Rv.id(c), RVW.Rv.text(c), RVW.Rv.by(c), RVW.Rv.where(c), RVW.Rv.resolved(c), Rc.reply.lines(RVW.Review.replies(all, RVW.Rv.id(c)))}}
+    case None{}:
+      None{}
+
+def Rc.open(+u: Ui) -> Maybe<&2, RcOpen>:
+  Rc.open.k(Bool.pick(Maybe<&2, RVW.Comment>, String.is_empty(Rc.sel(u)), None{}, Rc.find(Rc.all(u), Rc.sel(u))), Rc.all(u))
+
+def Rc.count(+u: Ui) -> Nat:
+  RVW.Review.count.open(Rc.all(u))
+
+# the version a new comment is made on: a commit's, else the working copy
+def Rc.commit(+u: Ui) -> String:
+  Bool.pick(String, Nat.is_eq(HI.Hist.kind(Ui.view_get(u, "view.path")), 1n), HI.Hist.git.commit(Ui.view_get(u, "view.path")), "")
+
+# a number as JSON wants it (0 when it is not one)
+def Rc.num(+s: String) -> String:
+  Bool.pick(String, Maybe.is_some(&2, F32, F32.read(s)), s, "0")
+
+def Rc.send.k(+xs: List<&2, String>, +u: Ui, +text: String) -> Act:
+  Ui.rpc(Ui.scratch_set(Ui.scratch_set(u, "@rc.at:" ++ Ui.sel(u), ""), "@f.rcnote", ""), "review.comment",
+    [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"op", J.Str{"add"}}, J.KV{"file", J.Str{Rc.rel(u)}}, J.KV{"commit", J.Str{Rc.commit(u)}},
+     J.KV{"kind", J.Str{Hs.kname(Hs.kind(u))}}, J.KV{"layer", J.Str{HI.Hist.at(xs, 2n)}}, J.KV{"x", J.Num{Rc.num(HI.Hist.at(xs, 0n))}}, J.KV{"y", J.Num{Rc.num(HI.Hist.at(xs, 1n))}},
+     J.KV{"item", J.Str{HI.Hist.at(xs, 3n)}}, J.KV{"text", J.Str{text}}])
+
+def Rc.send(+u: Ui) -> Act:
+  Bool.pick(Act, Bool.or(String.is_empty(Rc.at(u)), String.is_empty(String.trim(Ui.scratch(u, "@f.rcnote")))), Act{u, Nil{}},
+    Rc.send.k(String.split(Rc.at(u), '\t'), u, String.trim(Ui.scratch(u, "@f.rcnote"))))
+
+def Rc.op(+u: Ui, +op: String, +id: String) -> Act:
+  Ui.rpc(u, "review.comment", [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"op", J.Str{op}}, J.KV{"id", J.Str{id}}])
+
+def Rc.reply(+u: Ui) -> Act:
+  Bool.pick(Act, Bool.or(String.is_empty(Rc.sel(u)), String.is_empty(String.trim(Ui.scratch(u, "@f.rcreply")))), Act{u, Nil{}},
+    Ui.rpc(Ui.scratch_set(u, "@f.rcreply", ""), "review.comment", [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"op", J.Str{"add"}}, J.KV{"parent", J.Str{Rc.sel(u)}},
+      J.KV{"file", J.Str{Rc.rel(u)}}, J.KV{"text", J.Str{String.trim(Ui.scratch(u, "@f.rcreply"))}}]))
+
+def Rc.act(i: Nat, +u: Ui, +value: String) -> Act:
+  match i:
+    case 0n:
+      Act{Ui.scratch_set(Ui.scratch_set(u, "@rc.at:" ++ Ui.sel(u), value), "@rc.sel:" ++ Ui.sel(u), ""), Nil{}}
+    case 1n:
+      Rc.send(u)
+    case 2n:
+      Act{Ui.scratch_set(u, "@rc.at:" ++ Ui.sel(u), ""), Nil{}}
+    case 3n:
+      Act{Ui.scratch_set(Ui.scratch_set(u, "@rc.sel:" ++ Ui.sel(u), value), "@rc.at:" ++ Ui.sel(u), ""), Nil{}}
+    case 4n:
+      Rc.reply(u)
+    case 5n:
+      Rc.op(u, "resolve", value)
+    case 6n:
+      Rc.op(u, "reopen", value)
+    case _:
+      Act{u, Nil{}}
+
+def Rc.actions() -> List<&2, String>:
+  ["rv-note", "rv-note-send", "rv-note-shut", "rv-pin", "rv-reply-send", "rv-resolve", "rv-reopen"]
+
+# Design review: the Review tab
+# ------------------------------
+# A viewer kind of its own ("review"), its path the page on show (Rp.pages:
+# "bom"). A page is a report the hub writes as Markdown (review.bom: the
+# BOM, or what changed between the two versions a comparison picked, kept
+# until it is closed), which every client draws with its own Markdown.
+# Kept per thread and page in the info map: "rp.md:<t>:<page>",
+# "rp.err:<t>:<page>", "rp.title:<t>:<page>"; the page being asked for is
+# the scratch's "@rp.busy:<t>". "rv-page" shows a page and asks for it,
+# "rv-run" asks again, "rv-bom" (the comparison bar's BOM) opens the BOM.
+
+def Rp.pages() -> List<&2, String>:
+  ["bom", "checks", "comments", "release"]
+
+def Rp.label(+page: String) -> String:
+  Bool.pick(String, String.eq(page, "bom"), "BOM", Bool.pick(String, String.eq(page, "checks"), "Checks", Bool.pick(String, String.eq(page, "comments"), "Comments", Bool.pick(String, String.eq(page, "release"), "Release", page))))
+
+# the page on show ("" when the tab is not)
+def Rp.page(+u: Ui) -> String:
+  Bool.pick(String, String.eq(Ui.view_get(u, "view.kind"), "review"), Bool.pick(String, String.is_empty(Ui.view_get(u, "view.path")), "bom", Ui.view_get(u, "view.path")), "")
+
+def Rp.key(+u: Ui, +k: String, +page: String) -> String:
+  k ++ ":" ++ Ui.sel(u) ++ ":" ++ page
+
+# a comparison picked (and not closed) is what the BOM page compares
+def Rp.compared(+u: Ui) -> Bool:
+  Bool.not(String.is_empty(Hs.get(u, "cmp.a")))
+
+def Rp.bom.title(+u: Ui) -> String:
+  Bool.pick(String, Rp.compared(u),
+    "BOM change · " ++ Hs.get(u, "cmp.al") ++ " → " ++ Bool.pick(String, String.is_empty(Hs.get(u, "cmp.bl")), "Working copy", Hs.get(u, "cmp.bl")),
+    "BOM · Working copy")
+
+def Rp.ask.bom(+u: Ui) -> Act:
+  Ui.rpc(Ui.info_set(Ui.scratch_set(u, "@rp.busy:" ++ Ui.sel(u), "bom"), Rp.key(u, "rp.title", "bom"), Rp.bom.title(u)), "review.bom",
+    [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"a", J.Str{Bool.pick(String, Rp.compared(u), Hs.get(u, "cmp.a"), "")}}, J.KV{"b", J.Str{Bool.pick(String, Rp.compared(u), Hs.get(u, "cmp.b"), "")}}])
+
+# the design checks run on the working copy, or on the new side of a
+# comparison when that is a commit
+def Rp.commit(+u: Ui) -> String:
+  Bool.pick(String, Nat.is_eq(HI.Hist.kind(Hs.get(u, "cmp.b")), 1n), HI.Hist.git.commit(Hs.get(u, "cmp.b")), "")
+
+def Rp.checks.title(+u: Ui) -> String:
+  "Checks · " ++ Bool.pick(String, String.is_empty(Rp.commit(u)), "Working copy", Hs.get(u, "cmp.bl"))
+
+def Rp.ask.checks(+u: Ui) -> Act:
+  Ui.rpc(Ui.info_set(Ui.scratch_set(u, "@rp.busy:" ++ Ui.sel(u), "checks"), Rp.key(u, "rp.title", "checks"), Rp.checks.title(u)), "review.checks",
+    [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"commit", J.Str{Rp.commit(u)}}, J.KV{"trigger", J.Str{"manual"}}])
+
+# The Release page: a tag (the field "@f.rltag", else the next one after
+# the repository's tags, REL.Release.next over history.refs' tags), whether
+# to publish it on GitHub ("@rl.pub:<t>") and to release even when the
+# checks fail ("@rl.force:<t>"); "rv-release" asks the hub (review.release),
+# "rv-release-pub" and "rv-release-force" turn those on and off
+type RlForm is Data:
+  RlForm{tag: String, next: String, publish: Bool, force: Bool}
+
+def Rl.tags.k(tag: Bool, +l: String, rest: List<&2, String>) -> List<&2, String>:
+  match tag:
+    case True{}:
+      l <> rest
+    case False{}:
+      rest
+
+def Rl.tags(rs: List<&2, HI.Ref>) -> List<&2, String>:
+  match rs:
+    case Nil{}:
+      Nil{}
+    case HI.Ref{+k, +l, _} <> t:
+      Rl.tags.k(String.eq(k, "tag"), l, Rl.tags(t))
+
+def Rl.next(+u: Ui) -> String:
+  REL.Release.next(Rl.tags(HI.Hist.refs(J.Json.get_str(Hs.refs(u), "refs", ""))))
+
+def Rl.tag(+u: Ui) -> String:
+  Bool.pick(String, String.is_empty(String.trim(Ui.scratch(u, "@f.rltag"))), Rl.next(u), String.trim(Ui.scratch(u, "@f.rltag")))
+
+def Rl.on(+u: Ui, +k: String) -> Bool:
+  String.eq(Ui.scratch(u, k ++ ":" ++ Ui.sel(u)), "1")
+
+def Rl.form(+u: Ui) -> RlForm:
+  RlForm{Rl.tag(u), Rl.next(u), Rl.on(u, "@rl.pub"), Rl.on(u, "@rl.force")}
+
+def Rl.flip(+u: Ui, +k: String) -> Ui:
+  Ui.scratch_set(u, k ++ ":" ++ Ui.sel(u), Bool.pick(String, Rl.on(u, k), "", "1"))
+
+def Rl.ask(+u: Ui) -> Act:
+  Ui.rpc(Ui.info_set(Ui.scratch_set(u, "@rp.busy:" ++ Ui.sel(u), "release"), Rp.key(u, "rp.err", "release"), ""), "review.release",
+    [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"tag", J.Str{Rl.tag(u)}}, J.KV{"publish", J.Flag{Rl.on(u, "@rl.pub")}}, J.KV{"force", J.Flag{Rl.on(u, "@rl.force")}}])
+
+# opening the page asks for the tags once (the next one is proposed)
+def Rl.open(+u: Ui) -> Act:
+  Bool.pick(Act, String.is_empty(Hs.get(u, "refs")), Ui.rpc(u, "history.refs", [J.KV{"thread", J.Str{Ui.sel(u)}}]), Act{u, Nil{}})
+
+def Rp.ask(+u: Ui, +page: String) -> Act:
+  Bool.pick(Act, String.eq(page, "bom"), Rp.ask.bom(u), Bool.pick(Act, String.eq(page, "checks"), Rp.ask.checks(u), Bool.pick(Act, String.eq(page, "release"), Rl.open(u), Act{u, Nil{}})))
+
+def Rp.open(+u: Ui, +page: String) -> Act:
+  Rp.ask(Ui.view_put(u, "review", page), page)
+
+# the hub's answer: {report: {thread, page, md, err}}, a check's with
+# {gate, line, tasks} too
+def Rp.store(+u: Ui, +r: J.Json) -> Ui:
+  +k = J.Json.get_str(r, "thread", "") ++ ":" ++ J.Json.get_str(r, "page", "")
+  Ui.scratch_set(Ui.info_set(Ui.info_set(Ui.info_set(Ui.info_set(Ui.info_set(u, "rp.md:" ++ k, J.Json.get_str(r, "md", "")), "rp.err:" ++ k, J.Json.get_str(r, "err", "")),
+    "rp.gate:" ++ k, J.Json.get_str(r, "gate", "")), "rp.line:" ++ k, J.Json.get_str(r, "line", "")), "rp.tasks:" ++ k, J.Json.show(Maybe.default(&2, J.Json, J.Json.get(r, "tasks"), J.Json.arr(Nil{})))),
+    "@rp.busy:" ++ J.Json.get_str(r, "thread", ""), "")
+
+# a box ticked: {ticked: {thread, tasks}}
+def Rp.ticked(+u: Ui, +r: J.Json) -> Ui:
+  Ui.info_set(u, "rp.tasks:" ++ J.Json.get_str(r, "thread", "") ++ ":checks", J.Json.show(Maybe.default(&2, J.Json, J.Json.get(r, "tasks"), J.Json.arr(Nil{}))))
+
+def Rp.ticked.has(+o: J.Json) -> Bool:
+  Bool.not(String.eq(J.Json.show(Maybe.default(&2, J.Json, J.Json.get(J.Json.get_obj(o, "result"), "ticked"), J.Null{})), "null"))
+
+def Rp.ticked.k(has: Bool, u: Ui, +o: J.Json) -> Ui:
+  match has:
+    case True{}:
+      Rp.ticked(u, J.Json.get_obj(J.Json.get_obj(o, "result"), "ticked"))
+    case False{}:
+      u
+
+def Rp.reply.has(+o: J.Json) -> Bool:
+  Bool.not(String.eq(J.Json.show(Maybe.default(&2, J.Json, J.Json.get(J.Json.get_obj(o, "result"), "report"), J.Null{})), "null"))
+
+def Rp.reply.k(has: Bool, u: Ui, +o: J.Json) -> Ui:
+  match has:
+    case True{}:
+      Rp.store(u, J.Json.get_obj(J.Json.get_obj(o, "result"), "report"))
+    case False{}:
+      u
+
+def Rp.reply(has: Bool, u: Ui, +o: J.Json) -> Ui:
+  Rp.ticked.k(Rp.ticked.has(o), Rp.reply.k(has, u, o), o)
+
+# The checks page: why the gate fails ("" it passes), the one-line summary,
+# and the checklist's boxes (each ticked with "rv-tick" and its index)
+type RpTask is Data:
+  RpTask{index: Nat, text: String, done: Bool, group: String}
+
+def Rp.gate(+u: Ui) -> String:
+  Ui.info(u, Rp.key(u, "rp.gate", "checks"))
+
+def Rp.line(+u: Ui) -> String:
+  Ui.info(u, Rp.key(u, "rp.line", "checks"))
+
+def Rp.task.list(xs: List<&2, J.Json>, +i: Nat) -> List<&2, RpTask>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case +x <> t:
+      RpTask{i, J.Json.get_str(x, "text", ""), J.Json.get_bool(x, "done", False{}), J.Json.get_str(x, "group", "")} <> Rp.task.list(t, 1n+i)
+
+def Rp.tasks(+u: Ui) -> List<&2, RpTask>:
+  Rp.task.list(J.Json.elems(Maybe.default(&2, J.Json, J.Json.parse(Ui.info(u, Rp.key(u, "rp.tasks", "checks"))), J.Json.arr(Nil{}))), 0n)
+
+def Rp.tick(+u: Ui, +i: String) -> Act:
+  Ui.rpc(u, "review.tick", [J.KV{"thread", J.Str{Ui.sel(u)}}, J.KV{"index", J.Num{Nat.show(Maybe.default(&2, Nat, Nat.read(i), 0n))}}])
+
+# what every client draws: the pages (their labels and which is on), the
+# title, the report's Markdown, why it failed, whether it is being made
+type RpTab is Data:
+  RpTab{page: String, label: String, on: Bool}
+
+type RpView is Data:
+  RpView{page: String, tabs: List<&2, RpTab>, title: String, md: String, err: String, busy: Bool}
+
+def Rp.tabs(ps: List<&2, String>, +cur: String) -> List<&2, RpTab>:
+  match ps:
+    case Nil{}:
+      Nil{}
+    case +p <> t:
+      RpTab{p, Rp.label(p), String.eq(p, cur)} <> Rp.tabs(t, cur)
+
+# (the Comments page is the thread's own: no hub report)
+def Rp.view.k(comments: Bool, +u: Ui, +page: String) -> RpView:
+  match comments:
+    case True{}:
+      RpView{page, Rp.tabs(Rp.pages(), page), "Comments · " ++ Nat.show(Rc.count(u)) ++ " open", RVW.Review.md(Rc.all(u)), "", False{}}
+    case False{}:
+      RpView{page, Rp.tabs(Rp.pages(), page), Bool.pick(String, String.eq(page, "release"), "Tag " ++ Rl.tag(u), Ui.info(u, Rp.key(u, "rp.title", page))), Ui.info(u, Rp.key(u, "rp.md", page)), Ui.info(u, Rp.key(u, "rp.err", page)),
+        String.eq(Ui.scratch(u, "@rp.busy:" ++ Ui.sel(u)), page)}
+
+def Rp.view(+u: Ui) -> RpView:
+  Rp.view.k(String.eq(Rp.page(u), "comments"), u, Rp.page(u))
+
+def RpView.page(v: RpView) -> String:
+  match v:
+    case RpView{p, _, _, _, _, _}:
+      p
+
+def RpView.md(v: RpView) -> String:
+  match v:
+    case RpView{_, _, _, md, _, _}:
+      md
+
+def RpView.title(v: RpView) -> String:
+  match v:
+    case RpView{_, _, t, _, _, _}:
+      t
+
+def RpView.err(v: RpView) -> String:
+  match v:
+    case RpView{_, _, _, _, e, _}:
+      e
+
+def RpView.busy(v: RpView) -> Bool:
+  match v:
+    case RpView{_, _, _, _, _, b}:
+      b
+
+def RpView.tabs(v: RpView) -> List<&2, RpTab>:
+  match v:
+    case RpView{_, ts, _, _, _, _}:
+      ts
+
+# what the page says while it has nothing to show
+def RpView.note(+v: RpView) -> String:
+  Bool.pick(String, RpView.busy(v), "Reading the design…",
+    Bool.pick(String, String.is_empty(RpView.err(v)), Bool.pick(String, String.is_empty(RpView.md(v)), Bool.pick(String, String.eq(RpView.page(v), "comments"), "No comments yet. Right-click a place on the board or schematic (long-press on a phone) to comment there.",
+      Bool.pick(String, String.eq(RpView.page(v), "release"), "Tag this design and make its fabrication outputs: Gerbers, drill, CPL, BOM, PDFs and STEP, in .backplane/releases.", "Nothing yet.")), ""), RpView.err(v)))
+
+def Rv.act.k(i: Nat, +u: Ui, +value: String) -> Act:
+  match i:
+    case 0n:
+      Act{Rv.as(u, value), Nil{}}
+    case 1n:
+      Act{Rv.bits.set(u, value), Nil{}}
+    case 2n:
+      Rv.ref(u, String.split(value, '\t'))
+    case 3n:
+      Rp.open(u, Bool.pick(String, String.is_empty(value), "bom", value))
+    case 4n:
+      Rp.ask(u, Rp.page(u))
+    case 5n:
+      Rp.open(u, "bom")
+    case 6n:
+      Rp.tick(u, value)
+    case 7n:
+      Rl.ask(u)
+    case 8n:
+      Act{Rl.flip(u, "@rl.pub"), Nil{}}
+    case 9n:
+      Act{Rl.flip(u, "@rl.force"), Nil{}}
+    case _:
+      Act{u, Nil{}}
+
+def Rv.act.c(comment: Bool, +u: Ui, +action: String, +value: String) -> Act:
+  match comment:
+    case True{}:
+      Rc.act(C.Codec.pos(Rc.actions(), action), u, value)
+    case False{}:
+      Rv.act.k(C.Codec.pos(["rv-as", "rv-bits", "rv-ref", "rv-page", "rv-run", "rv-bom", "rv-tick", "rv-release", "rv-release-pub", "rv-release-force"], action), u, value)
+
+def Rv.act(+u: Ui, +action: String, +value: String) -> Act:
+  Rv.act.c(Nat.is_lt(C.Codec.pos(Rc.actions(), action), 7n), u, action, value)
+
 def Ui.reply.skills(u: Ui, +o: J.Json) -> Ui:
-  Fv.reply(Fm.has(J.Json.get_obj(o, "result"), "farView"), Skills.got(Skills.has(o), Mpage.reply(Mpage.has(o), Hs.refs.store(Hs.refs.has(o), Ui.reply.body(u, o), o), o), o), J.Json.get_obj(o, "result"))
+  Rp.reply(Rp.reply.has(o), Rv.reply(Rv.reply.has(o), Fv.reply(Fm.has(J.Json.get_obj(o, "result"), "farView"), Skills.got(Skills.has(o), Mpage.reply(Mpage.has(o), Hs.refs.store(Hs.refs.has(o), Ui.reply.body(u, o), o), o), o), J.Json.get_obj(o, "result")), o), o)
 
 # The bar
 # -------
+# (shown under every board and schematic, so any of them can be compared
+# with another version: docs/design-review.md)
 # What every client's viewer shows under a board or schematic with a
 # history (or a comparison on show): on, the track's length and the
 # position (0 live), what the step followed and what was said before it.
 
 type HBar is Data:
   HBar{on: Bool, n: Nat, at: Nat, title: String, entry: String, label: String, said: String, playing: Bool, diff: Bool, cmp: Bool, a: String, b: String, menu: String}
+
+# what the bar says while the live file shows, every client the same
+def Hs.live.said(+n: Nat) -> String:
+  Bool.pick(String, Nat.is_eq(n, 0n), "The live file. Compare it with any commit, branch or tag.", "The live file. Each tick is a change the agent made; play to watch them.")
 
 def Hs.said.line(+s: String) -> String:
   HI.Hist.line(s)
@@ -6223,7 +7101,7 @@ def Hs.bar.k(m: Maybe<&2, HI.Step>, +u: Ui, +n: Nat, +at: Nat, +es: List<&2, M.E
         HI.Hist.anchor(es, s), HI.Hist.label(es, HI.Hist.anchor(es, s)), Hs.said.line(HI.Hist.said(es, HI.Hist.anchor(es, s))),
         Hs.playing(u), Hs.diff(u), False{}, "", "", Ui.scratch(u, "@cmp.menu")}
     case None{}:
-      HBar{Bool.or(Nat.is_gt(n, 0n), Hs.cmp(u)), n, 0n, Bool.pick(String, Hs.cmp(u), "Comparing", "Live · " ++ Nat.show(n) ++ Bool.pick(String, Nat.is_eq(n, 1n), " step", " steps")),
+      HBar{True{}, n, 0n, Bool.pick(String, Hs.cmp(u), "Comparing", Bool.pick(String, Nat.is_eq(n, 0n), "Live", "Live · " ++ Nat.show(n) ++ Bool.pick(String, Nat.is_eq(n, 1n), " step", " steps"))),
         "", "", "", Hs.playing(u), Hs.diff(u), Hs.cmp(u), Hs.get(u, "cmp.al"), Bool.pick(String, String.is_empty(Hs.get(u, "cmp.bl")), "Working copy", Hs.get(u, "cmp.bl")), Ui.scratch(u, "@cmp.menu")}
 
 def HBar.on(b: HBar) -> Bool:
@@ -6331,6 +7209,198 @@ def ApiKeys.dots(s: String) -> String:
       SNil{}
     case SCon{_, t}:
       SCon{'•', ApiKeys.dots(t)}
+
+# Antigravity (core/agy.bend) in Settings: one list of rows all four
+# clients draw (each a label, a note, fields and buttons). The agent and
+# its accounts come from the models info ("agy"), the job in progress from
+# the hub's answer to this client ("agy.job"), the method and account from
+# the settings agy.auth and agy.account (an API key unless set; a Google
+# account carries Google's warning). Actions "agy-*" go to the hub as
+# bots.voice op "agy" (server.bend's AgyJob); a key goes to the API keys
+# file under the method's name (GEMINI_API_KEY or GOOGLE_API_KEY) and is
+# never kept in the client's state.
+
+type AgBtn is Data:
+  AgBtn{label: String, action: String, value: String, on: Bool}
+
+type AgField is Data:
+  AgField{name: String, hint: String, secret: Bool, value: String, enter: String}
+
+type AgRow is Data:
+  AgRow{label: String, note: String, fields: List<&2, AgField>, btns: List<&2, AgBtn>}
+
+def Agv.info(+u: Ui) -> J.Json:
+  J.Json.get_obj(Maybe.default(&2, J.Json, J.Json.parse(Ui.info(u, "models")), J.Null{}), "agy")
+
+def Agv.job(+u: Ui) -> J.Json:
+  Maybe.default(&2, J.Json, J.Json.parse(Ui.info(u, "agy.job")), J.Null{})
+
+def Agv.method(+u: Ui) -> String:
+  AGY.Agy.method(M.Setting.get(Ui.state.of(u), "agy.auth", ""))
+
+def Agv.acct(+u: Ui) -> String:
+  AGY.Agy.acct(M.Setting.get(Ui.state.of(u), "agy.account", ""))
+
+def Agv.strs(xs: List<&2, J.Json>) -> List<&2, String>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case +x <> t:
+      J.Json.as_str(Some{x}, "") <> Agv.strs(t)
+
+def Agv.has(xs: List<&2, String>, +x: String) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case +h <> t:
+      Bool.or(String.eq(h, x), Agv.has(t, x))
+
+def Agv.accts(+u: Ui) -> List<&2, String>:
+  Agv.strs(J.Json.elems(J.Json.get_obj(Agv.info(u), "accts")))
+
+def Agv.signed(+u: Ui) -> Bool:
+  Agv.has(Agv.strs(J.Json.elems(J.Json.get_obj(Agv.info(u), "signed"))), Agv.acct(u))
+
+def Agv.busy(+u: Ui, +what: String) -> Bool:
+  Bool.and(String.eq(J.Json.get_str(Agv.job(u), "what", ""), what), String.eq(J.Json.get_str(Agv.job(u), "state", ""), "running"))
+
+def Agv.have(+u: Ui) -> String:
+  J.Json.get_str(Agv.info(u), "have", "")
+
+# what Settings says about the agent itself
+def Agv.install.note(+u: Ui) -> String:
+  Bool.pick(String, Agv.busy(u, "install"), J.Json.get_str(Agv.job(u), "msg", ""),
+    Bool.pick(String, String.eq(J.Json.get_str(Agv.job(u), "what", ""), "install"), J.Json.get_str(Agv.job(u), "msg", "") ++ " ", "")
+      ++ Bool.pick(String, Bool.not(String.is_empty(Agv.have(u))), "Google's own agent, Antigravity " ++ Agv.have(u) ++ ", installed. Backplane runs it; it signs in by itself.",
+        Bool.pick(String, Bool.not(String.is_empty(J.Json.get_str(Agv.info(u), "old", ""))), "Antigravity " ++ J.Json.get_str(Agv.info(u), "old", "") ++ " is installed; Backplane now pins " ++ AGY.Agy.version() ++ ".",
+          Bool.pick(String, J.Json.get_bool(Agv.info(u), "plat", True{}), "Not installed. Backplane downloads Google's agent (agy_acp_server " ++ AGY.Agy.version() ++ ", from the ACP registry, a few hundred MB) and checks its pinned SHA-256.",
+            "Google has no Antigravity build for this machine."))))
+
+def Agv.install.btns(+u: Ui) -> List<&2, AgBtn>:
+  Bool.pick(List<&2, AgBtn>, Bool.or(Agv.busy(u, "install"), Bool.not(J.Json.get_bool(Agv.info(u), "plat", True{}))), Nil{},
+    [AgBtn{Bool.pick(String, String.is_empty(Agv.have(u)), Bool.pick(String, String.is_empty(J.Json.get_str(Agv.info(u), "old", "")), "Install", "Update to " ++ AGY.Agy.version()), "Reinstall"),
+      "agy-install", "", String.is_empty(Agv.have(u))}])
+
+def Agv.methods(ms: List<&2, String>, +cur: String) -> List<&2, AgBtn>:
+  match ms:
+    case Nil{}:
+      Nil{}
+    case +m <> t:
+      AgBtn{AGY.Agy.label(m), "setting", "agy.auth=" ++ m, String.eq(m, cur)} <> Agv.methods(t, cur)
+
+# the key the method reads, from the API keys (names only)
+def Agv.key.row(+u: Ui) -> List<&2, AgRow>:
+  Bool.pick(List<&2, AgRow>, String.is_empty(AGY.Agy.key(Agv.method(u))), Nil{},
+    [AgRow{AGY.Agy.key(Agv.method(u)), Bool.pick(String, Agv.has(ApiKeys.names(u), AGY.Agy.key(Agv.method(u))), "Saved in API keys. Check it to list the models it offers.",
+        "Not saved yet. It goes to this machine's API keys file; no client shows it again."),
+      [AgField{"agykey", "Paste the key", True{}, Ui.scratch(u, "@f.agykey"), "agy-key"}],
+      [AgBtn{"Save key", "agy-key", "", False{}}, AgBtn{"Check", "agy-signin", "", True{}}]}])
+
+def Agv.gcp.note(+p: String, +l: String) -> String:
+  Bool.pick(String, Bool.and(String.is_empty(p), String.is_empty(l)), "Not set.", "Project " ++ AGY.Agy.or(p, "not set") ++ ", location " ++ AGY.Agy.or(l, "not set") ++ ".")
+
+def Agv.gcp.row(+u: Ui) -> List<&2, AgRow>:
+  Bool.pick(List<&2, AgRow>, Bool.not(AGY.Agy.gcp(Agv.method(u))), Nil{},
+    [AgRow{"Google Cloud project", Agv.gcp.note(M.Setting.get(Ui.state.of(u), "agy.gcp.project", ""), M.Setting.get(Ui.state.of(u), "agy.gcp.location", "")),
+      [AgField{"agyproj", "Project ID", False{}, Ui.scratch(u, "@f.agyproj"), "agy-gcp"}, AgField{"agyloc", "Location, e.g. us-central1", False{}, Ui.scratch(u, "@f.agyloc"), "agy-gcp"}],
+      [AgBtn{"Save", "agy-gcp", "", False{}}]}])
+
+def Agv.acct.btns(xs: List<&2, String>, +cur: String) -> List<&2, AgBtn>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case +a <> t:
+      AgBtn{a, "setting", "agy.account=" ++ a, String.eq(a, cur)} <> Agv.acct.btns(t, cur)
+
+def Agv.accts.shown(+u: Ui) -> List<&2, String>:
+  Bool.pick(List<&2, String>, Agv.has(Agv.accts(u), Agv.acct(u)), Agv.accts(u), List.append(&2, String, Agv.accts(u), [Agv.acct(u)]))
+
+def Agv.google.row(+u: Ui) -> List<&2, AgRow>:
+  Bool.pick(List<&2, AgRow>, Bool.not(AGY.Agy.browser(Agv.method(u))), Nil{},
+    [AgRow{"Account", Agv.acct(u) ++ Bool.pick(String, Agv.signed(u), ": signed in. The agent keeps its own sign-in; Backplane never sees it.", ": not signed in."),
+      [AgField{"agyacct", "Another account's name", False{}, Ui.scratch(u, "@f.agyacct"), "agy-acct"}],
+      List.concat(&2, AgBtn, [Agv.acct.btns(Agv.accts.shown(u), Agv.acct(u)), [AgBtn{"Add account", "agy-acct", "", False{}}, AgBtn{"Sign in with Google", "agy-signin", "", True{}}],
+        Bool.pick(List<&2, AgBtn>, Agv.signed(u), [AgBtn{"Sign out", "agy-signout", Agv.acct(u), False{}}], Nil{}),
+        Bool.pick(List<&2, AgBtn>, Agv.has(Agv.accts(u), Agv.acct(u)), [AgBtn{"Remove", "agy-forget", Agv.acct(u), False{}}], Nil{})])}])
+
+def Agv.job.k(i: Nat, +u: Ui, +j: J.Json) -> List<&2, AgRow>:
+  match i:
+    case 0n:
+      [AgRow{"Sign-in", J.Json.get_str(j, "msg", ""), Nil{}, [AgBtn{"Cancel", "agy-cancel", "", False{}}]}]
+    case 1n:
+      [AgRow{"Sign-in", J.Json.get_str(j, "msg", ""), [AgField{"agyback", "Paste the address Google sent you to", False{}, Ui.scratch(u, "@f.agyback"), "agy-back"}],
+        [AgBtn{"Open Google's sign-in", "open-url", J.Json.get_str(j, "url", ""), True{}}, AgBtn{"Continue", "agy-back", "", False{}}, AgBtn{"Cancel", "agy-cancel", "", False{}}]}]
+    case 2n:
+      [AgRow{"Sign-in", J.Json.get_str(j, "msg", ""), Nil{}, Nil{}}]
+    case 3n:
+      [AgRow{"Sign-in failed", J.Json.get_str(j, "msg", ""), Nil{}, Nil{}}]
+    case _:
+      Nil{}
+
+# the sign-in in progress (or just finished): what it says, its link and
+# the field for Google's way back
+def Agv.job.row(+u: Ui) -> List<&2, AgRow>:
+  Bool.pick(List<&2, AgRow>, Bool.or(String.eq(J.Json.get_str(Agv.job(u), "what", ""), "signin"), String.eq(J.Json.get_str(Agv.job(u), "what", ""), "signout")),
+    Agv.job.k(C.Codec.pos(["running", "waiting", "done", "failed"], J.Json.get_str(Agv.job(u), "state", "")), u, Agv.job(u)), Nil{})
+
+# every row, in order
+def Agv.rows(+u: Ui) -> List<&2, AgRow>:
+  List.concat(&2, AgRow, [
+    [AgRow{"Antigravity", Agv.install.note(u), Nil{}, Agv.install.btns(u)},
+     AgRow{"Sign in with", AGY.Agy.note(Agv.method(u)), Nil{}, Agv.methods(AGY.Agy.methods(), Agv.method(u))}],
+    Agv.key.row(u), Agv.gcp.row(u), Agv.google.row(u), Agv.job.row(u)])
+
+def Agv.rpc(u: Ui, +what: String, kvs: List<&2, J.KV>) -> Act:
+  Voice.rpc(u, "agy", J.KV{"do", J.Str{what}} <> kvs)
+
+def Agv.signin(+u: Ui) -> Act:
+  Agv.rpc(u, "signin", [J.KV{"method", J.Str{Agv.method(u)}}, J.KV{"account", J.Str{Agv.acct(u)}},
+    J.KV{"project", J.Str{M.Setting.get(Ui.state.of(u), "agy.gcp.project", "")}}, J.KV{"location", J.Str{M.Setting.get(Ui.state.of(u), "agy.gcp.location", "")}}])
+
+def Agv.then.k(b: Act, cs: List<&2, Cmd>) -> Act:
+  match b:
+    case Act{u2, cs2}:
+      Act{u2, List.append(&2, Cmd, cs, cs2)}
+
+# a second setting after an action
+def Agv.then(a: Act, +kv: String) -> Act:
+  match a:
+    case Act{u, cs}:
+      Agv.then.k(Ui.setting(u, kv), cs)
+
+def Agv.gcp(+u: Ui) -> Act:
+  Agv.then(Ui.setting(Ui.scratch_set(Ui.scratch_set(u, "@f.agyproj", ""), "@f.agyloc", ""), "agy.gcp.project=" ++ AGY.Agy.or(String.trim(Ui.scratch(u, "@f.agyproj")), M.Setting.get(Ui.state.of(u), "agy.gcp.project", ""))),
+    "agy.gcp.location=" ++ AGY.Agy.or(String.trim(Ui.scratch(u, "@f.agyloc")), M.Setting.get(Ui.state.of(u), "agy.gcp.location", "")))
+
+def Agv.key(+u: Ui) -> Act:
+  Voice.rpc(Ui.scratch_set(u, "@f.agykey", ""), "api-add", [J.KV{"name", J.Str{AGY.Agy.key(Agv.method(u))}}, J.KV{"value", J.Str{String.trim(Ui.scratch(u, "@f.agykey"))}}])
+
+def Agv.act.k(i: Nat, +u: Ui, +value: String) -> Act:
+  match i:
+    case 0n:
+      Agv.rpc(u, "install", Nil{})
+    case 1n:
+      Agv.signin(u)
+    case 2n:
+      Agv.rpc(Ui.scratch_set(u, "@f.agyback", ""), "back", [J.KV{"url", J.Str{String.trim(Ui.scratch(u, "@f.agyback"))}}])
+    case 3n:
+      Agv.rpc(u, "cancel", Nil{})
+    case 4n:
+      Agv.rpc(u, "signout", [J.KV{"account", J.Str{value}}])
+    case 5n:
+      Agv.rpc(u, "forget", [J.KV{"account", J.Str{value}}])
+    case 6n:
+      Agv.key(u)
+    case 7n:
+      Agv.gcp(u)
+    case 8n:
+      Ui.setting(Ui.scratch_set(u, "@f.agyacct", ""), "agy.account=" ++ AGY.Agy.acct(Ui.scratch(u, "@f.agyacct")))
+    case _:
+      Agv.rpc(u, "status", Nil{})
+
+# an "agy-" action
+def Agv.act(+u: Ui, +action: String, +value: String) -> Act:
+  Agv.act.k(C.Codec.pos(["agy-install", "agy-signin", "agy-back", "agy-cancel", "agy-signout", "agy-forget", "agy-key", "agy-gcp", "agy-acct"], action), u, value)
 
 # past the phone's upload: the viewer's history (Hs.act, from 31)
 def Upload.rest(hist: Bool, +i: Nat, +u: Ui, +value: String) -> Act:
@@ -6889,10 +7959,17 @@ def Timeline.visible(settings: Bool, selected: Bool, thread: Bool) -> Bool:
     case _ _ _:
       False{}
 
+# whether `sel` is the thread a bot's view is on: its own, or (the
+# uberbot, whose conversation runs on one machine at a time) any of its
+# replicas' (ubersync.bend's Ub.chat.is)
+def Bots.chat.is(+st: M.State, +id: String, +th: String, +sel: String) -> Bool:
+  Bool.or(String.eq(th, sel), Bool.and(UB.Uber.is(st, id), US.Ub.chat.is(st, sel)))
+
+# (the uberbot with no tab picked shows its Status, not its chat)
 def Timeline.bot(m: Maybe<&2, BT.Bot>, +u: Ui) -> Bool:
   match m:
-    case Some{BT.Bot{_, _, +th, _, _, _, _}}:
-      Bool.or(Bool.not(String.eq(th, Ui.sel(u))), Bool.or(String.is_empty(Ui.scratch(u, "@btab")), String.eq(Ui.scratch(u, "@btab"), "chat")))
+    case Some{BT.Bot{+bid, _, +th, _, _, _, _}}:
+      Bool.or(Bool.not(Bots.chat.is(Ui.state.of(u), bid, th, Ui.sel(u))), Bool.or(Bool.and(String.is_empty(Ui.scratch(u, "@btab")), Bool.not(UB.Uber.is(Ui.state.of(u), bid))), String.eq(Ui.scratch(u, "@btab"), "chat")))
     case None{}:
       True{}
 
@@ -6985,7 +8062,7 @@ def Page.earlier(+u: Ui, +value: String) -> Ui:
 def Bots.tab.with(a: Act) -> Act:
   match a:
     case Act{u, cs}:
-      Act{u, Scroll{} <> cs}
+      Act{u, ScrollEnd{} <> cs}
 
 # a bot's tab; Settings asks Google's status too, so the accounts signed
 # in (perhaps in a browser since) are the hub's
@@ -6994,7 +8071,7 @@ def Bots.tab.k(settings: Bool, u: Ui) -> Act:
     case True{}:
       Bots.tab.with(Bots.google.rpc(u, "status", ""))
     case False{}:
-      Act{u, [Scroll{}]}
+      Act{u, [ScrollEnd{}]}
 
 def Bots.act(i: Nat, +u: Ui, +value: String) -> Act:
   match i:
@@ -7003,7 +8080,7 @@ def Bots.act(i: Nat, +u: Ui, +value: String) -> Act:
     case 1n:
       Bots.tab.k(String.eq(value, "settings"), Ui.scratch_set(u, "@btab", value))
     case 2n:
-      Act{Bots.flag(u, "@bnew"), [Focus{"bot-name"}]}
+      Act{Bots.flag(Ui.scratch_set(u, "@uber.new", ""), "@bnew"), [Focus{"bot-name"}]}
     case 3n:
       Bots.create(u)
     case 4n:
@@ -7423,8 +8500,33 @@ def Tour.done(+st: M.State) -> Bool:
 def Tour.ready(+u: Ui) -> Bool:
   Bool.and(Bool.and(Nat.is_gt(Ui.seq(u), 0n), String.eq(Ui.scratch(u, "@sync"), "1")), String.is_empty(Ui.scratch(u, "@boot")))
 
+# The uberbot step alone: an install that finished the tour before it had
+# that step (or demoted its uberbot) is asked once more, until the step has
+# been answered (the hub setting "onboard.uber": Done, Skip or a choice, in
+# the full tour too). Only while no uberbot is set, only for a tour that came
+# up by itself, and (like it) only once this connection's state has arrived.
+def Tour.answered(+st: M.State) -> Bool:
+  String.eq(M.Setting.get(st, "onboard.uber", ""), "1")
+
+def Tour.single.k(+st: M.State, +raw: String) -> Bool:
+  Bool.and(Bool.and(Tour.done(st), Bool.not(Tour.answered(st))), Bool.and(String.is_empty(UB.Uber.bot(st)), Bool.not(OB.Ob.manual(raw))))
+
+def Tour.single(+u: Ui) -> Bool:
+  Bool.and(Tour.ready(u), Tour.single.k(Ui.state.of(u), Ui.scratch(u, "@tour")))
+
+def Tour.at.k(+i: Nat, up: Bool) -> Nat:
+  Bool.pick(Nat, Bool.and(Nat.is_eq(i, OB.Ob.count()), up), OB.Ob.uber(), i)
+
 def Tour.at(+u: Ui) -> Nat:
-  OB.Ob.at(Tour.ready(u), Tour.done(Ui.state(u)), Ui.scratch(u, "@tour"))
+  Tour.at.k(OB.Ob.at(Tour.ready(u), Tour.done(Ui.state(u)), Ui.scratch(u, "@tour")), Tour.single(u))
+
+# what the card says: no "10 of 10" for a step asked alone
+def Tour.counter(+u: Ui) -> String:
+  Bool.pick(String, Tour.single(u), "", OB.Ob.counter(Tour.at(u)))
+
+# whether the card has a Back (not the first step, not a step alone)
+def Tour.back(+u: Ui) -> Bool:
+  Bool.and(Nat.is_gt(Tour.at(u), 0n), Bool.not(Tour.single(u)))
 
 def Tour.on(+u: Ui) -> Bool:
   OB.Ob.live(Tour.at(u))
@@ -7433,9 +8535,82 @@ def Tour.on(+u: Ui) -> Bool:
 def Tour.days(+u: Ui) -> String:
   Nat.show(Nat.div(M.Scratch.window(Ui.state(u)), 86400n))
 
+# The uberbot step (core/onboard.bend's Ob.uber): what it offers depends on
+# the bots here. "have": an uberbot is set; "pick": bots, none set; "none":
+# no bots. A bot is counted by the entries of its thread (only while the
+# tour is up; M.State.mine reads the thread's own index).
+type Used is Data:
+  Used{n: Nat, bot: BT.Bot}
+
+# most used first, ties the oldest first
+def Used.before(a: Used, b: Used) -> Bool:
+  match a b:
+    case Used{+na, ba} Used{+nb, bb}:
+      Bool.pick(Bool, Nat.is_gt(na, nb), True{}, Bool.pick(Bool, Nat.is_eq(na, nb), BT.Bot.before(ba, bb), False{}))
+
+def Tour.used(bs: List<&2, BT.Bot>, +st: M.State) -> List<&2, Used>:
+  match bs:
+    case Nil{}:
+      Nil{}
+    case +b <> t:
+      Used{List.length(&2, M.Entry, M.State.mine(st, BT.Bot.thread(b))), b} <> Tour.used(t, st)
+
+# this machine's bots, the most used first
+def Tour.ranked(+st: M.State) -> List<&2, Used>:
+  List.sort(~Used, ~Used.before, Tour.used(BT.World.bots.here(M.State.bots(st)), st))
+
+def Tour.uber.case.k(+have: String, any: Bool) -> String:
+  Bool.pick(String, Bool.not(String.is_empty(have)), "have", Bool.pick(String, any, "pick", "none"))
+
+def Tour.uber.case(+u: Ui) -> String:
+  Tour.uber.case.k(UB.Uber.bot(Ui.state.of(u)), Bool.not(List.is_empty(&2, BT.Bot, BT.World.bots.here(M.State.bots(Ui.state.of(u))))))
+
+def Tour.uber.name.k(uc: String, +first: String, +have: String) -> String:
+  Bool.pick(String, String.eq(uc, "have"), have, first)
+
+def Tour.uber.first(us: List<&2, Used>) -> String:
+  match us:
+    case Used{_, b} <> _:
+      BT.Bot.name(b)
+    case Nil{}:
+      ""
+
+# the name the words use: the uberbot's, or the bot used most
+def Tour.uber.name(+u: Ui) -> String:
+  Tour.uber.name.k(Tour.uber.case(u), Tour.uber.first(Tour.ranked(Ui.state.of(u))), BT.Bot.name(BT.World.bot(M.State.bots(Ui.state.of(u)), UB.Uber.bot(Ui.state.of(u)))))
+
+# a choice on the tour's card: a button that sends an action
+type TChoice is Data:
+  TChoice{label: String, action: String, value: String}
+
+def Tour.pick.one(first: Bool, +b: BT.Bot) -> TChoice:
+  TChoice{Bool.pick(String, first, "Make " ++ BT.Bot.name(b) ++ " my uberbot", "Make " ++ BT.Bot.name(b)), "uber-promote", BT.Bot.id(b)}
+
+def Tour.picks(us: List<&2, Used>, first: Bool) -> List<&2, TChoice>:
+  match us:
+    case Nil{}:
+      Nil{}
+    case Used{_, b} <> t:
+      Tour.pick.one(first, b) <> Tour.picks(t, False{})
+
+def Tour.choices.k(+uc: String, +st: M.State) -> List<&2, TChoice>:
+  Bool.pick(List<&2, TChoice>, String.eq(uc, "none"), [TChoice{"Create my uberbot", "uber-new", ""}],
+    Bool.pick(List<&2, TChoice>, String.eq(uc, "pick"), List.append(&2, TChoice, Tour.picks(List.take(&2, Used, Tour.ranked(st), 3n), True{}), [TChoice{"Create a new one", "uber-new", ""}]), Nil{}))
+
+# the buttons under the uberbot step's words (none on other steps)
+def Tour.choices.on(on: Bool, +u: Ui) -> List<&2, TChoice>:
+  match on:
+    case True{}:
+      Tour.choices.k(Tour.uber.case(u), Ui.state.of(u))
+    case False{}:
+      Nil{}
+
+def Tour.choices(+u: Ui) -> List<&2, TChoice>:
+  Tour.choices.on(Nat.is_eq(Tour.at(u), OB.Ob.uber()), u)
+
 # the step's words for a kind of client (0 window, 1 web, 2 phone)
 def Tour.body(+k: Nat, +u: Ui) -> String:
-  OB.Ob.body(k, Tour.days(u), Tour.at(u))
+  OB.Ob.body.uber(k, Tour.days(u), Tour.uber.case(u), Tour.uber.name(u), Tour.at(u))
 
 def Tour.target.k(+g: String, open: Bool) -> String:
   Bool.pick(String, Bool.and(String.eq(g, "head"), Bool.not(open)), "", g)
@@ -7477,8 +8652,19 @@ def Tour.leave(a: Act, +field: String) -> Act:
     case Act{u, cs}:
       Act{u, Focus{field} <> cs}
 
+# the tour is over, and its uberbot step answered ("onboard.uber")
+def Tour.finish.cat(a: Act, cs: List<&2, Cmd>) -> Act:
+  match a:
+    case Act{u, fs}:
+      Act{u, List.append(&2, Cmd, cs, fs)}
+
+def Tour.finish.both(a: Act) -> Act:
+  match a:
+    case Act{u, cs}:
+      Tour.finish.cat(Ui.setting(u, "onboard.uber=1"), cs)
+
 def Tour.finish(+u: Ui) -> Act:
-  Tour.leave(Ui.setting(Ui.scratch_set(u, "@tour", ""), "onboard.done=1"), Tour.focus(u))
+  Tour.leave(Tour.finish.both(Ui.setting(Ui.scratch_set(u, "@tour", ""), "onboard.done=1")), Tour.focus(u))
 
 # to step i (by hand or not as the tour was), or (past the last) the end
 def Tour.go.k(live: Bool, +i: Nat, +u: Ui) -> Act:
@@ -7497,12 +8683,20 @@ def Tour.open.k(+u: Ui) -> Act:
 def Tour.open(+u: Ui) -> Act:
   Tour.open.k(Ui.flag_off(u, "settings"))
 
+# Back goes nowhere on the first step or a step asked alone
+def Tour.back.k(has: Bool, +u: Ui) -> Act:
+  match has:
+    case True{}:
+      Tour.go(OB.Ob.back(Tour.at(u)), u)
+    case False{}:
+      Act{u, Nil{}}
+
 def Tour.act.k(i: Nat, +u: Ui) -> Act:
   match i:
     case 0n:
       Tour.go(OB.Ob.next(Tour.at(u)), u)
     case 1n:
-      Tour.go(OB.Ob.back(Tour.at(u)), u)
+      Tour.back.k(Tour.back(u), u)
     case 2n:
       Tour.finish(u)
     case 3n:
@@ -7521,20 +8715,68 @@ def Tour.act.on(on: Bool, +u: Ui, +action: String) -> Act:
 def Tour.act(+u: Ui, +action: String) -> Act:
   Tour.act.on(Tour.on(u), u, action)
 
+# The uberbot (core/uber.bend, docs/uber.md): "uber" shows its Status tab,
+# "uber-promote <bot>" and "uber-demote" ask the hub (bots.uber), which backs
+# the bot up before it logs the promotion. Routed ahead of the action table.
+def Uber.show.k(none: Bool, +u: Ui, +id: String) -> Act:
+  match none:
+    case True{}:
+      Act{u, Nil{}}
+    case False{}:
+      Bots.select(Ui.scratch_set(u, "@btab", "status"), id)
+
+def Uber.show(+u: Ui) -> Act:
+  Uber.show.k(String.is_empty(UB.Uber.bot(Ui.state.of(u))), u, UB.Uber.bot(Ui.state.of(u)))
+
+# "uber-bot <bot>|<tab>": a bot with a tab shown (a routine's row)
+def Uber.bot.at(+u: Ui, +value: String) -> Act:
+  Bots.select(Ui.scratch_set(u, "@btab", Maybe.default(&2, String, List.get(&2, String, String.split(value, '|'), 1n), "")), Maybe.default(&2, String, List.head(&2, String, String.split(value, '|')), ""))
+
+# "uber-new": the new bot form opens for the uberbot (the tour's "Create my
+# uberbot"): Settings shut, "@uber.new" set so the request carries uber
+def Uber.new(+u: Ui) -> Act:
+  Act{Ui.scratch_set(Ui.scratch_set(Ui.flag_off(u, "settings"), "@bnew", "1"), "@uber.new", "1"), [Focus{"bot-name"}]}
+
+# "uber-home" asks the hub (bots.uber_home) to make this machine hold the
+# uberbot's conversation (the Status strip's "Make this the home").
+def Uber.act.k(i: Nat, +u: Ui, +value: String) -> Act:
+  match i:
+    case 0n:
+      Uber.show(u)
+    case 1n:
+      Ui.rpc(u, "bots.uber", [J.KV{"bot", J.Str{value}}])
+    case 2n:
+      Ui.rpc(u, "bots.uber", [J.KV{"bot", J.Str{""}}])
+    case 3n:
+      Uber.bot.at(u, value)
+    case 4n:
+      Uber.new(u)
+    case 5n:
+      Ui.rpc(u, "bots.uber_home", Nil{})
+    case _:
+      Act{u, Nil{}}
+
+def Uber.act.go(route: Bool, +u: Ui, +action: String, +value: String) -> Act:
+  match route:
+    case True{}:
+      Uber.act.k(C.Codec.pos(["uber", "uber-promote", "uber-demote", "uber-bot", "uber-new", "uber-home"], action), u, value)
+    case False{}:
+      Ui.act.k(C.Codec.pos(Ui.actions(), action), u, value)
+
 # a user action with its value
 def Ui.act.m(menu: Bool, +i: Nat, +u: Ui, +action: String, +value: String) -> Act:
   match menu:
     case True{}:
       Menu.act.k(i, u, value)
     case False{}:
-      Menu.after(action, Ui.reselect.act(Ui.sel(u), Ui.act.k(C.Codec.pos(Ui.actions(), action), u, value)))
+      Menu.after(action, Ui.reselect.act(Ui.sel(u), Uber.act.go(String.starts_with(action, "uber"), u, action, value)))
 
 def Ui.act.e(emb: Bool, +u: Ui, +action: String, +value: String) -> Act:
   match emb:
     case True{}:
       Emb.act(u, action, value)
     case False{}:
-      Emb.sync.sel(Ui.sel(u), Mpage.sync(Ui.act.m(Nat.is_lt(C.Codec.pos(Menu.actions(), action), 16n), C.Codec.pos(Menu.actions(), action), u, action, value)))
+      Emb.sync.sel(Ui.sel(u), Mpage.sync(Ui.act.m(Nat.is_lt(C.Codec.pos(Menu.actions(), action), 17n), C.Codec.pos(Menu.actions(), action), u, action, value)))
 
 # the picker's machine row (routed before the action table)
 def Ui.act.p(pick: Bool, +u: Ui, +action: String, +value: String) -> Act:
@@ -7551,8 +8793,121 @@ def Ui.act.t(tour: Bool, +u: Ui, +action: String, +value: String) -> Act:
     case False{}:
       Ui.act.p(String.eq(action, "proj-on"), u, action, value)
 
+# A choice on the tour's uberbot step does its action, then ends the tour
+# like Done (the action's own commands come after the tour's focus).
+def Tour.choose.fin(f: Act, cs: List<&2, Cmd>) -> Act:
+  match f:
+    case Act{u, fs}:
+      Act{u, List.append(&2, Cmd, fs, cs)}
+
+def Tour.choose.k(a: Act) -> Act:
+  match a:
+    case Act{u, cs}:
+      Tour.choose.fin(Tour.finish(u), cs)
+
+def Ui.act.c(choice: Bool, +u: Ui, +action: String, +value: String) -> Act:
+  match choice:
+    case True{}:
+      Tour.choose.k(Ui.act.t(False{}, u, action, value))
+    case False{}:
+      Ui.act.t(String.starts_with(action, "ob-"), u, action, value)
+
+def Ui.act.u(pick: Bool, +u: Ui, +action: String, +value: String) -> Act:
+  match pick:
+    case True{}:
+      Ui.act.c(Nat.is_eq(Tour.at(u), OB.Ob.uber()), u, action, value)
+    case False{}:
+      Ui.act.c(False{}, u, action, value)
+
+# (design review's "rv-" actions route before the rest: Rv.act)
+def Ui.act.r(rv: Bool, +u: Ui, +action: String, +value: String) -> Act:
+  match rv:
+    case True{}:
+      Rv.act(u, action, value)
+    case False{}:
+      Ui.act.u(Nat.is_lt(C.Codec.pos(["uber-promote", "uber-new"], action), 2n), u, action, value)
+
+# (Antigravity's "agy-" actions route before the rest too: Agv.act)
+def Ui.act.g(agy: Bool, +u: Ui, +action: String, +value: String) -> Act:
+  match agy:
+    case True{}:
+      Agv.act(u, action, value)
+    case False{}:
+      Ui.act.r(String.starts_with(action, "rv-"), u, action, value)
+
+def Ui.act.s(close: Bool, +u: Ui, +action: String, +value: String) -> Act:
+  match close:
+    case True{}:
+      Skills.close(u)
+    case False{}:
+      Ui.act.g(String.starts_with(action, "agy-"), u, action, value)
+
+# The time zone (Settings, all clients)
+# ---------------------------------------
+# The person's zone: the one they or a bot set (person.tz), else the one a
+# phone reported (person.tz.device), else the hub machine's. The row shows
+# "Europe/Helsinki · EEST +03:00 · from your phone", a field for a zone name
+# with Set ("tz-set", field @f.tzname) and Automatic ("tz-auto", on while a
+# zone is set). A phone reports its zone ("tz-report" with the zone, sent to
+# every paired hub). An error from the hub shows under the row (@tz.try).
+
+def Tzs.er(u: Ui) -> String:
+  match u:
+    case Ui{_, _, _, _, _, _, _, _, _, _, _, _, er, _, _, _, _}:
+      er
+
+def Tzs.source(+s: String) -> String:
+  Bool.pick(String, String.eq(s, "set"), "set", Bool.pick(String, String.eq(s, "phone"), "from your phone", Bool.pick(String, String.eq(s, "machine"), "this machine", "nothing reported yet")))
+
+def Tzs.off(+u: Ui) -> TZ.TzOff:
+  TZ.Tz.off(SC.Sched.person(Ui.state.of(u), 0n, True{}), Side.now(u))
+
+# "Europe/Helsinki · EEST +03:00 · from your phone"
+def Tzs.line(+u: Ui) -> String:
+  SC.Zone.person(Ui.state.of(u)) ++ " · " ++ TZ.Tz.abbr(Tzs.off(u)) ++ " " ++ TZ.Tz.offset.text(Tzs.off(u)) ++ " · " ++ Tzs.source(SC.Zone.source(Ui.state.of(u)))
+
+def Tzs.auto(+u: Ui) -> Bool:
+  Bool.not(String.is_empty(M.Setting.get(Ui.state.of(u), "person.tz", "")))
+
+# the error shows only while the zone tried (@tz.try) is not the one set:
+# once the hub takes it, a later unrelated error stays off this row
+def Tzs.err(+u: Ui) -> String:
+  Bool.pick(String, Bool.and(Bool.not(String.is_empty(Ui.scratch(u, "@tz.try"))),
+    Bool.not(String.eq(Ui.scratch(u, "@tz.try"), M.Setting.get(Ui.state.of(u), "person.tz", "")))), Tzs.er(u), "")
+
+def Tzs.set.k(ok: Bool, +u: Ui, +zone: String) -> Act:
+  match ok:
+    case True{}:
+      Ui.rpc(Ui.scratch_set(u, "@tz.try", zone), "zone.set", [J.KV{"zone", J.Str{zone}}])
+    case False{}:
+      Act{Ui.error_set(Ui.scratch_set(u, "@tz.try", Bool.pick(String, String.is_empty(zone), "?", zone)), "That is not a time zone name (like Europe/Helsinki)"), Nil{}}
+
+def Tzs.set(+u: Ui) -> Act:
+  Tzs.set.k(SC.Zone.valid(String.trim(Bots.field(u, "tzname"))), u, String.trim(Bots.field(u, "tzname")))
+
+def Tzs.act.k(i: Nat, +u: Ui, +value: String) -> Act:
+  match i:
+    case 0n:
+      Tzs.set(u)
+    case 1n:
+      Ui.rpc(Ui.scratch_set(Ui.scratch_set(u, "@f.tzname", ""), "@tz.try", ""), "zone.set", [J.KV{"zone", J.Str{"auto"}}])
+    case 2n:
+      Ui.rpc(u, "zone.report", [J.KV{"zone", J.Str{value}}])
+    case _:
+      Act{u, Nil{}}
+
+def Tzs.act(+u: Ui, +action: String, +value: String) -> Act:
+  Tzs.act.k(C.Codec.pos(["tz-set", "tz-auto", "tz-report"], action), u, value)
+
+def Ui.act.z(tz: Bool, +u: Ui, +action: String, +value: String) -> Act:
+  match tz:
+    case True{}:
+      Tzs.act(u, action, value)
+    case False{}:
+      Ui.act.s(String.eq(action, "skill-close"), u, action, value)
+
 def Ui.act(+u: Ui, +action: String, +value: String) -> Act:
-  Ui.act.t(String.starts_with(action, "ob-"), u, action, value)
+  Rc.sync.of(Ui.act.z(String.starts_with(action, "tz-"), u, action, value))
 
 # the newest n of a list (oldest first), and how many are left out
 type Win is Data:

@@ -23,7 +23,7 @@ object Notes {
 
     fun channels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(TURNS, "Finished turns", NotificationManager.IMPORTANCE_DEFAULT))
+        nm.createNotificationChannel(NotificationChannel(TURNS, "Personal alerts", NotificationManager.IMPORTANCE_DEFAULT))
         nm.createNotificationChannel(NotificationChannel(LIVE, "Agents working", NotificationManager.IMPORTANCE_LOW).apply {
             setShowBadge(false)
         })
@@ -41,13 +41,6 @@ object Notes {
         return PendingIntent.getActivity(ctx, code, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 
-    // opens the app asking which working thread to show
-    fun pick(ctx: Context, code: Int): PendingIntent {
-        val i = Intent(ctx, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            .putExtra(EXTRA_PICK, true)
-        return PendingIntent.getActivity(ctx, code, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-    }
 
     // one notification per key (src/core/notice.bend: "turn-<thread>", or
     // "room-<room>" for a room exchange, the same on every paired hub): a
@@ -63,7 +56,12 @@ object Notes {
             .setContentTitle(c.title)
             .setContentText(c.body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(c.body))
-            .setCategory(if (c.kind == "fail") NotificationCompat.CATEGORY_ERROR else NotificationCompat.CATEGORY_STATUS)
+            .setCategory(when (c.kind) {
+                "fail" -> NotificationCompat.CATEGORY_ERROR
+                "ask", "reminder" -> NotificationCompat.CATEGORY_REMINDER
+                "note" -> NotificationCompat.CATEGORY_MESSAGE
+                else -> NotificationCompat.CATEGORY_STATUS
+            })
             .setContentIntent(open(ctx, c.thread, id(c.thread)))
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)

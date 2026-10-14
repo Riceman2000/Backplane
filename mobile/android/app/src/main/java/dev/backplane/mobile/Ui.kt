@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -58,6 +59,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
@@ -95,6 +97,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -113,6 +117,8 @@ import androidx.compose.material.icons.filled.AddCircleOutline
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.animation.core.animateFloatAsState
@@ -133,8 +139,47 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+
+// A cached destination has no input until its matching screen arrives.
+// The Back control sits outside the inert content, so opening is cancellable.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OpeningDestination(m: AppModel, s: Screen, o: Core.Opening) {
+    val page = m.seenPages[o.nav]
+    Scaffold(topBar = {
+        TopAppBar(title = { Text(o.title) }, navigationIcon = {
+            IconButton(onClick = { m.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+        })
+    }) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding).clearAndSetSemantics { }) {
+            val b = m.seenBots[o.nav]
+            val t = m.seenThreads[o.nav]
+            if (b != null && page != null) BotDestination(m, page, b)
+            else if (t != null) ThreadScreen(m, page ?: s.copy(thread = t, bot = null), t)
+            else Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (o.cat.isNotEmpty()) BotCat(m, o.cat, 48.dp)
+                    Text(o.title, style = MaterialTheme.typography.titleLarge)
+                }
+                repeat(6) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(Modifier.fillMaxWidth(0.65f).height(18.dp).background(MaterialTheme.colorScheme.surfaceVariant))
+                        Box(Modifier.fillMaxWidth().height(12.dp).background(MaterialTheme.colorScheme.surfaceVariant))
+                    }
+                }
+            }
+            // Covers cached fields, buttons and scroll gestures, not Back.
+            Box(Modifier.fillMaxSize().pointerInput(o.nav) {
+                awaitPointerEventScope {
+                    while (true) { awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() } }
+                }
+            })
+        }
+    }
+}
 
 @Composable
 fun App(m: AppModel) {
@@ -153,8 +198,13 @@ fun App(m: AppModel) {
         }
         // New Thread: its page at once, waiting for the hub's thread
         s.making && !leftNew -> {
-            BackHandler { leftNew = true; m.act("select", "") }
-            MakingScreen { leftNew = true; m.act("select", "") }
+            BackHandler { leftNew = true; m.back() }
+            MakingScreen { leftNew = true; m.back() }
+        }
+        m.leaving -> Projects(m, s, onPair = { pairing = true })
+        m.opening != null -> {
+            BackHandler { m.back() }
+            OpeningDestination(m, s, m.opening!!)
         }
         s.thread != null && s.thread.viewer.open == "files" && s.thread.viewer.files != null -> {
             BackHandler { m.act("view", "") }
@@ -163,6 +213,10 @@ fun App(m: AppModel) {
         s.thread != null && (s.thread.viewer.open == "image" || s.thread.viewer.open == "pdf") && s.thread.viewer.file != null -> {
             BackHandler { m.act("fm") }
             FileScreen(m, s.thread.viewer, s.thread.viewer.file)
+        }
+        s.thread != null && s.thread.viewer.open == "review" && s.thread.viewer.review != null -> {
+            BackHandler { m.act("view", "") }
+            ReviewScreen(m, s.thread.viewer, s.thread.viewer.review)
         }
         s.thread != null && s.thread.viewer.open == "renders" && s.thread.viewer.mech != null -> {
             BackHandler { m.act("view", "") }
@@ -179,11 +233,11 @@ fun App(m: AppModel) {
         }
         // a bot (its chat is its thread), a room, or a bot on a linked machine
         s.bot != null -> {
-            BackHandler { m.act("select", "") }
+            BackHandler { m.back() }
             BotDestination(m, s, s.bot)
         }
         s.thread != null -> {
-            BackHandler { m.act("select", "") }
+            BackHandler { m.back() }
             ThreadScreen(m, s, s.thread)
         }
         else -> Projects(m, s, onPair = { pairing = true })
@@ -233,28 +287,6 @@ fun App(m: AppModel) {
         },
         dismissButton = { TextButton(onClick = { removed = true; m.act("proj-keep") }) { Text(r.no) } },
     )
-    // the live status tapped while several threads work: which to open
-    if (m.picking && s.island.lines.size > 1) {
-        Overlaid()
-        AlertDialog(
-            onDismissRequest = { m.picking = false },
-            title = { Text(s.island.headline) },
-            text = {
-                Column {
-                    s.island.lines.forEach { l ->
-                        TextButton(onClick = { m.picking = false; m.act("select", l.thread) }, modifier = Modifier.fillMaxWidth()) {
-                            Column(Modifier.fillMaxWidth()) {
-                                Text(l.title.ifEmpty { l.doing }, maxLines = 1)
-                                Text(l.doing, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, maxLines = 1)
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { m.picking = false }) { Text("Cancel") } },
-        )
-    } else if (m.picking) m.picking = false
     // the first-run tour (core/onboard.bend): the same as iOS, dismissing it
     // (Back, a tap outside) is Skip. The screen model has no step while Bend
     // knows of another overlay; the app adds the hubs screen and every
@@ -269,7 +301,12 @@ fun App(m: AppModel) {
                     Text(t.title)
                 }
             },
-            text = { Column(Modifier.verticalScroll(rememberScrollState())) { Text(t.body) } },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(t.body)
+                    for (c in t.choices) OutlinedButton(onClick = { m.act(c.action, c.value) }, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text(c.label) }
+                }
+            },
             confirmButton = { TextButton(onClick = { m.act("ob-next") }) { Text(t.next) } },
             dismissButton = {
                 Row {
@@ -466,7 +503,7 @@ private fun ThreadRow(m: AppModel, r: Row) {
                 modifier = Modifier.alpha(if (r.faded) 0.45f else 1f).combinedClickableCompat(onLong = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     m.act("row-menu", r.id)
-                }) { m.act("select", r.id) },
+                }) { m.open(r.id, "select", r.id, r.title) },
             )
         }
         Box(Modifier.align(Alignment.TopEnd)) {
@@ -537,7 +574,7 @@ private fun Projects(m: AppModel, s: Screen, onPair: () -> Unit) {
         },
         snackbarHost = { SnackbarHost(snacks) },
     ) { pad ->
-        if (s.projects.isEmpty() && s.bots.isEmpty() && s.rooms.isEmpty()) {
+        if (s.projects.isEmpty() && s.bots.isEmpty() && s.rooms.isEmpty() && s.uber == null) {
             Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
                 Text(s.empty, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.outline)
             }
@@ -546,6 +583,12 @@ private fun Projects(m: AppModel, s: Screen, onPair: () -> Unit) {
             // the search is always the list's first row (projects, or in the
             // active view threads by title or project)
             s.search?.let { f -> item(key = "find") { SearchField(m, f, s.projects.firstOrNull()?.id) } }
+            // the uberbot's card, and the status plane under it
+            m.uber(s)?.let { u ->
+                item(key = "uber") { UberCardRow(m, u) }
+                m.plane(s)?.let { planeSections(m, it, false) }
+                item(key = "d:uber") { HorizontalDivider() }
+            }
             if (s.view == "active") {
                 if (s.active.isEmpty() && s.settled == null) {
                     if (s.projects.isNotEmpty() && s.search?.query.isNullOrEmpty()) item(key = "none") {
@@ -805,7 +848,7 @@ fun ThreadScreen(m: AppModel, s: Screen, t: ThreadView, below: (@Composable () -
         // opaque, so the entries scrolled under it (a bot's cat and tabs) never show through
         topBar = { Column(Modifier.background(MaterialTheme.colorScheme.surface)) {
             TopAppBar(
-                navigationIcon = { IconButton(onClick = { m.act("select", "") }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                navigationIcon = { IconButton(onClick = { m.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 title = {
                     Column {
                         Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -953,7 +996,11 @@ fun ThreadScreen(m: AppModel, s: Screen, t: ThreadView, below: (@Composable () -
                     ComposerExtras(m, t)
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         AttachButton(m)
-                        OutlinedTextField(m.composer, m::draft, Modifier.weight(1f), maxLines = 6,
+                        // the field keeps its own caret while typing; a draft changed from
+                        // outside (a completion, another thread) puts the caret at its end
+                        var field by remember { mutableStateOf(TextFieldValue(m.composer, TextRange(m.composer.length))) }
+                        if (field.text != m.composer) field = TextFieldValue(m.composer, TextRange(m.composer.length))
+                        OutlinedTextField(field, { v -> field = v; if (v.text != m.composer) m.draft(v.text) }, Modifier.weight(1f), maxLines = 6,
                             placeholder = { Text("Ask the agent") })
                         // a long press sends with the other follow-up mode (queue or steer);
                         // while a turn runs with nothing typed the button stops it
@@ -1024,6 +1071,7 @@ private fun PlotScreen(m: AppModel, v: Viewer) {
     val f = m.plots.frame?.takeIf { it.key == v.layers || (v.hist != null && it.none.isEmpty() && plotHead(it.key) == plotHead(v.layers)) }
     val mesh = m.plots.mesh?.takeIf { it.key == v.key }
     Column(Modifier.fillMaxSize().background(Color(0xFF000000.toInt() or v.bg))) {
+    var cam by remember { mutableStateOf(floatArrayOf(0f, 0f, 0f)) }
     Box(Modifier.weight(1f).fillMaxWidth()) {
         // a part alone gets a surface of its own: nothing of a board is left on it
         key(if (v.layers.isEmpty()) v.key else "") {
@@ -1034,6 +1082,8 @@ private fun PlotScreen(m: AppModel, v: Viewer) {
             s.tap = v.tap
             s.fadeMs = v.fade
             s.onPick = { m.act("view-pick", it) }
+            s.onNote = { x, y -> m.act("rv-note", "%.3f\t%.3f\t\t".format(java.util.Locale.ROOT, x, y)) }
+            s.onCamera = { x, y, k -> cam = floatArrayOf(x, y, k) }
             s.renderer.top = v.top
             s.renderer.bottom = v.bottom
             s.renderer.orbit.fov = v.fov
@@ -1062,14 +1112,10 @@ private fun PlotScreen(m: AppModel, v: Viewer) {
                 Text(v.note, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(16.dp), color = Color.Gray,
                     style = MaterialTheme.typography.labelMedium)
         }
+        v.comments?.let { c -> if (v.open == "board" || v.open == "schematic") PinLayer(m, c.pins, cam) }
         Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            SingleChoiceSegmentedButtonRow(Modifier.weight(1f)) {
-                v.choices.forEachIndexed { i, c ->
-                    SegmentedButton(selected = c.value == v.open, onClick = { m.act("view", c.value) },
-                        shape = SegmentedButtonDefaults.itemShape(i, v.choices.size), icon = {}) { Text(c.label, maxLines = 1, style = MaterialTheme.typography.labelMedium) }
-                }
-            }
+            ChoiceRow(v.choices, v.open, Modifier.weight(1f)) { m.act("view", it) }
             IconButton(onClick = { m.act("view", "") }) { Icon(Icons.Filled.Close, "Close", tint = if (v.light) Color.Black else Color.White) }
         }
         ViewerControls(m, v, f?.chunks?.map { it.layer }?.toSet() ?: emptySet(), Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 56.dp))
@@ -1080,6 +1126,9 @@ private fun PlotScreen(m: AppModel, v: Viewer) {
     v.hist?.let { h -> HistoryBar(m, h, v.light) }
     }
     v.hist?.let { h -> h.menu?.let { rows -> HistMenu(m, h.side, rows) } }
+    v.comments?.let { c ->
+        if (c.at.isNotEmpty()) NoteSheet(m, c.at) else c.open?.let { CommentSheet(m, it) }
+    }
 }
 
 // a plot key's kind and project (a version's key keeps both)
@@ -1104,9 +1153,18 @@ private fun HistoryBar(m: AppModel, h: HistBar, light: Boolean) {
                     HistChip("Old: ${h.a}", h.side == "a", fg, accent, Modifier.weight(1f, fill = false)) { m.act("cmp-side", "a") }
                     HistChip("New: ${h.b}", h.side == "b", fg, accent, Modifier.weight(1f, fill = false)) { m.act("cmp-side", "b") }
                 }
+                HistChip("BOM", false, fg, accent) { m.act("rv-bom", "") }
                 HistChip("Close", false, fg, accent) { m.act("cmp-close", "") }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            val shown = h.showing.ifEmpty { "diff" }
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                val ways = listOf("old" to "Old", "diff" to "Diff", "new" to "New")
+                ways.forEachIndexed { i, w ->
+                    SegmentedButton(selected = shown == w.first, onClick = { m.act("rv-as", w.first) },
+                        shape = SegmentedButtonDefaults.itemShape(i, ways.size), icon = {}) { Text(w.second, maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                }
+            }
+            if (shown == "diff") Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 val names = listOf("Removed", "Changed", "Added")
                 for (i in 0 until minOf(names.size, h.keys.size)) Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1186,7 +1244,14 @@ private fun HistMenu(m: AppModel, side: String, rows: List<HistRow>) {
         shape = androidx.compose.ui.graphics.RectangleShape) {
         Text(if (side == "a") "Compare from (old)" else "Compare with (new)", Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             style = MaterialTheme.typography.titleMedium)
-        LazyColumn(Modifier.navigationBarsPadding()) {
+        // any commit, branch or tag (rv-ref "<side>\t<text>")
+        var ref by remember { mutableStateOf("") }
+        OutlinedTextField(ref, { ref = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp), singleLine = true,
+            placeholder = { Text("Commit, branch or tag") },
+            shape = androidx.compose.ui.graphics.RectangleShape,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, imeAction = ImeAction.Go),
+            keyboardActions = KeyboardActions(onGo = { if (ref.isNotBlank()) m.act("rv-ref", side + "\t" + ref) }))
+        LazyColumn(Modifier.navigationBarsPadding().imePadding()) {
             items(rows) { r ->
                 ListItem(
                     headlineContent = { Text(r.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
