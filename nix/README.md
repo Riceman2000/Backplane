@@ -66,3 +66,15 @@ nix fmt
 ```
 
 `nix/update.sh` rewrites `nix/sources.nix` from that release's `SHA256SUMS` and from the tag's `KiStack.revision()` in `src/server/kicad.bend`. It needs `curl` and `python3`.
+
+## Building from source (`backplane-src`)
+
+`nix build .#backplane-src` builds this checkout the way the linux-x64
+release job does (`scripts/build.sh` with clang 19 and the X11 headers).
+`.#backplane` (the release binaries) stays the default package.
+
+- Bend 2.0.36 comes from source on Bun's x64-baseline build
+  (`nix/bend.nix`), so it also runs on CPUs without AVX2.
+- No Google sign-in is baked in; pair devices with pairing links.
+- The Bun host helpers (browser, STEP to GLB, voice) are not built.
+- Expect about 24 GB of RAM plus swap and tens of minutes.
